@@ -86,15 +86,23 @@ class ShortcutManager:
             self.listener_thread = None
 
     def stop_listening(self):
-        if self.hotkey_listener_obj:
-            print("Attempting to stop shortcut listener...")
+        # Check if the listener object exists and is alive
+        if self.hotkey_listener_obj and self.hotkey_listener_obj.is_alive(): 
+            print("ShortcutManager Info: Attempting to stop listener thread...")
             try:
-                self.hotkey_listener_obj.stop()
-                # The listener thread should exit once stop() is called.
-                # If it's a daemon thread, it will exit when the main program exits.
-                # If joinable, you might self.listener_thread.join() but GlobalHotKeys manages its thread.
-                print("Shortcut listener stop command issued.")
+                self.hotkey_listener_obj.stop() 
+                
+                print("ShortcutManager Info: Waiting for listener thread to join...")
+                self.hotkey_listener_obj.join(timeout=2.0) 
+                
+                if self.hotkey_listener_obj.is_alive():
+                    print("ShortcutManager Warning: Listener thread did not join after timeout.")
+                else:
+                    print("ShortcutManager Info: Listener thread successfully joined.")
             except Exception as e:
-                print(f"Error stopping shortcut listener: {e}")
-        self.hotkey_listener_obj = None
+                print(f"ShortcutManager Error: Exception during listener stop/join: {e}")
+        else:
+            print("ShortcutManager Info: Listener not active, already stopped, or never started.")
+        
+        self.hotkey_listener_obj = None 
         self.listener_thread = None

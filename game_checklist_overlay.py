@@ -2,6 +2,7 @@ import tkinter as tk
 import json
 import sys
 import threading
+import time
 
 from config_manager import ConfigManager
 from shortcut_manager import ShortcutManager
@@ -230,21 +231,24 @@ class GameChecklistApp:
         self._exiting_flag = True
         print("Exit application initiated.")
         def _actual_exit_sequence():
-            print("Stopping shortcut listener...")
+            print("App Info: Stopping shortcut listener...")
             if hasattr(self, 'shortcut_manager') and self.shortcut_manager: self.shortcut_manager.stop_listening()
-            print("Cancelling Tkinter timers...")
+            print("App Info: Cancelling Tkinter timers...")
             if hasattr(self, '_peek_timer') and self._peek_timer:
                 try:
                     if self.root.winfo_exists(): self.root.after_cancel(self._peek_timer)
-                except tk.TclError: pass # Timer might have already fired or root gone
+                except tk.TclError: pass 
                 self._peek_timer = None
-            print("Shutting down Tkinter...")
+            print("App Info: Shutting down Tkinter...")
             try:
                 if hasattr(self, 'root') and self.root and self.root.winfo_exists():
                     self.root.quit(); self.root.destroy()
-                    print("Tkinter shutdown complete.")
-            except tk.TclError: print("Error during Tkinter shutdown (already destroyed?).")
-            print("Python script exit sequence finished. Forcing process exit.")
+                    print("App Info: Tkinter shutdown complete.")
+            except tk.TclError: print("App Warning: Error during Tkinter shutdown (already destroyed?).")
+            print("App Info: Python script exit sequence finished.")
+            print("App Info: Pausing briefly before final sys.exit...")
+            time.sleep(0.1) 
+            print("App Info: Forcing process exit now via sys.exit(0).")
             sys.exit(0)
         
         # Try to schedule on main thread, but if root is gone, execute directly critical parts
