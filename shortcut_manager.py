@@ -1,19 +1,18 @@
+# shortcut_manager.py
 from pynput import keyboard
-import threading # Required for pynput listener thread management
+from PySide6.QtCore import QObject, Signal # Import QObject and Signal
 
-class ShortcutManager:
-    def __init__(self, config_manager, app_controls_dict):
-        """
-        Initializes the ShortcutManager.
-        :param config_manager: Instance of ConfigManager.
-        :param app_controls_dict: A dictionary where keys are action identifiers (e.g., "toggle_visibility")
-                                 and values are the corresponding callable methods from the app.
-        """
+class ShortcutManager(QObject): # Inherit from QObject to use signals
+    # Define signals
+    toggle_visibility_requested = Signal()
+    peek_visibility_requested = Signal()
+    exit_application_requested = Signal()
+
+    def __init__(self, config_manager):
+        super().__init__() # Call QObject constructor
         self.config_manager = config_manager
-        self.app_controls = app_controls_dict # This IS the dictionary of methods
-        self.listener_thread = None # pynput's GlobalHotKeys runs its own thread
-        self.hotkey_listener_obj = None # To store the GlobalHotKeys object
-        self.active_shortcuts_map = {} # For pynput: maps pynput-string to callback
+        self.hotkey_listener_obj = None
+        self.active_shortcuts_map = {}
         self._load_and_prepare_shortcuts()
 
     def _load_and_prepare_shortcuts(self):
@@ -22,87 +21,75 @@ class ShortcutManager:
             print("Warning: No shortcuts defined in config.")
             return
 
-        # Maps config key names to the keys expected in app_controls_dict
-        config_key_to_action_name_in_app_controls = {
-            "toggle_visibility": "toggle_visibility",
-            "peek_visibility": "peek_visibility",
-            "exit_application": "exit_application"
+        # Map config key names to the signals they should emit
+        shortcut_actions = {
+            "toggle_visibility": self.toggle_visibility_requested,
+            "peek_visibility": self.peek_visibility_requested,
+            "exit_application": self.exit_application_requested
         }
 
-        for conf_key, action_name in config_key_to_action_name_in_app_controls.items():
-            shortcut_str_from_config = shortcuts_config.get(conf_key)
-            
-            # Correctly get the function from the app_controls dictionary
-            action_function = self.app_controls.get(action_name)
-
-            if shortcut_str_from_config and callable(action_function):
+        for conf_key, signal_to_emit in shortcut_actions.items():
+            shortcut_str = shortcuts_config.get(conf_key)
+            if shortcut_str:
                 try:
-                    # Convert "ctrl+shift+x" to pynput's format e.g., "<ctrl>+<shift>+x"
                     pynput_keys = []
-                    parts = shortcut_str_from_config.lower().split('+')
+                    parts = shortcut_str.lower().split('+')
                     for part in parts:
                         if part in ["ctrl", "alt", "shift", "cmd"]:
                             pynput_keys.append(f"<{part}>")
-                        elif len(part) == 1: # Single character key
+                        elif len(part) == 1:
                             pynput_keys.append(part)
-                        # Extend for F-keys, special keys if needed, e.g., "f1" -> "<f1>"
                         elif part.startswith("f") and part[1:].isdigit():
-                             pynput_keys.append(f"<{part}>")
-                        # Add other specific key mappings if necessary
+                            pynput_keys.append(f"<{part}>")
+                        # Add more key mappings if needed (e.g. <space>, <enter>)
                     
                     if pynput_keys:
                         pynput_format_shortcut = "+".join(pynput_keys)
-                        self.active_shortcuts_map[pynput_format_shortcut] = action_function
-                        print(f"Prepared shortcut: {pynput_format_shortcut} for action '{action_name}'")
+                        # The callback for pynput will be a lambda that emits the signal
+                        self.active_shortcuts_map[pynput_format_shortcut] = lambda s=signal_to_emit: s.emit()
+                        print(f"Prepared shortcut: {pynput_format_shortcut} for {conf_key}")
                     else:
-                        print(f"Warning: Could not parse keys for shortcut '{shortcut_str_from_config}' for action '{action_name}'")
-
+                        print(f"Warning: Could not parse keys for shortcut '{shortcut_str}' for {conf_key}")
                 except Exception as e:
-                    print(f"Warning: Error processing shortcut '{shortcut_str_from_config}' for {action_name}: {e}")
-            elif not shortcut_str_from_config:
-                print(f"Info: Shortcut for '{conf_key}' (action '{action_name}') not defined in config.")
-            elif not callable(action_function):
-                print(f"Warning: Action method for '{action_name}' not found or not callable in app_controls.")
+                    print(f"Warning: Error processing shortcut '{shortcut_str}' for {conf_key}: {e}")
+            else:
+                print(f"Info: Shortcut for '{conf_key}' not defined.")
         
         if not self.active_shortcuts_map:
-            print("No valid shortcuts were prepared to be registered.")
-
+            print("No valid shortcuts were prepared.")
 
     def start_listening(self):
         if not self.active_shortcuts_map:
             print("ShortcutManager: No active shortcuts to listen for.")
             return
+        if self.hotkey_listener_obj and self.hotkey_listener_obj.is_alive():
+            print("ShortcutManager: Listener already active.")
+            return
 
         try:
-            # GlobalHotKeys takes a dictionary of {shortcut_string: callback}
             self.hotkey_listener_obj = keyboard.GlobalHotKeys(self.active_shortcuts_map)
-            self.hotkey_listener_obj.start() # This starts a new thread
-            self.listener_thread = self.hotkey_listener_obj # The listener object is the thread
+            self.hotkey_listener_obj.start() # This starts its own thread
             print(f"Shortcut listener started. Active shortcuts: {list(self.active_shortcuts_map.keys())}")
         except Exception as e:
+            # This can happen on Linux if accessibility features are not enabled
+            # or if another pynput listener is already running.
             print(f"Error starting global shortcut listener (pynput.keyboard.GlobalHotKeys): {e}")
-            print("Global shortcuts may not work. Ensure environment allows pynput (e.g., X11 accessibility).")
+            print("Global shortcuts may not work. Ensure environment allows pynput (e.g., X11 accessibility, no other listener).")
             self.hotkey_listener_obj = None
-            self.listener_thread = None
 
     def stop_listening(self):
-        # Check if the listener object exists and is alive
-        if self.hotkey_listener_obj and self.hotkey_listener_obj.is_alive(): 
-            print("ShortcutManager Info: Attempting to stop listener thread...")
+        if self.hotkey_listener_obj:
+            print("ShortcutManager Info: Attempting to stop listener...")
             try:
-                self.hotkey_listener_obj.stop() 
-                
-                print("ShortcutManager Info: Waiting for listener thread to join...")
-                self.hotkey_listener_obj.join(timeout=2.0) 
-                
-                if self.hotkey_listener_obj.is_alive():
-                    print("ShortcutManager Warning: Listener thread did not join after timeout.")
-                else:
-                    print("ShortcutManager Info: Listener thread successfully joined.")
+                self.hotkey_listener_obj.stop()
+                # GlobalHotKeys uses a daemon thread, join might not be strictly necessary
+                # or might hang if not handled correctly by pynput on all platforms.
+                # Let's assume .stop() is sufficient for now.
+                # If issues arise, investigate joining self.hotkey_listener_obj if it's a Thread instance.
+                print("ShortcutManager Info: Listener stop signal sent.")
             except Exception as e:
-                print(f"ShortcutManager Error: Exception during listener stop/join: {e}")
+                print(f"ShortcutManager Error: Exception during listener stop: {e}")
+            finally:
+                 self.hotkey_listener_obj = None # Clear reference
         else:
-            print("ShortcutManager Info: Listener not active, already stopped, or never started.")
-        
-        self.hotkey_listener_obj = None 
-        self.listener_thread = None
+            print("ShortcutManager Info: Listener not active or already stopped.")

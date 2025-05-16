@@ -1,129 +1,241 @@
-import tkinter as tk
-import json
+# main_app.py
 import sys
-import threading
-import time
+import time # For the brief pause in exit, if still desired
+from PySide6.QtWidgets import QApplication, QWidget, QVBoxLayout, QLabel, QSizePolicy
+from PySide6.QtCore import Qt, QPoint, QTimer, QRect, QMetaObject, Q_ARG
+from PySide6.QtGui import QColor, QPainter, QScreen, QCursor, QFont
 
 from config_manager import ConfigManager
 from shortcut_manager import ShortcutManager
 
 # --- Constants for Resizing and Cursors ---
-RESIZE_MARGIN = 8
-CURSOR_RESIZE_H = "sb_h_double_arrow"
-CURSOR_RESIZE_V = "sb_v_double_arrow"
-CURSOR_RESIZE_TL_BR = "sizing" 
-CURSOR_RESIZE_TR_BL = "sizing"
-CURSOR_DEFAULT = ""
+RESIZE_MARGIN = 8 # In pixels
+CURSOR_MAP = {
+    "arrow": Qt.ArrowCursor,
+    "size_h": Qt.SizeHorCursor,    # Horizontal resize
+    "size_v": Qt.SizeVerCursor,    # Vertical resize
+    "size_tl_br": Qt.SizeFDiagCursor, # Top-left to bottom-right
+    "size_tr_bl": Qt.SizeBDiagCursor, # Top-right to bottom-left
+}
 
+class OverlayWindow(QWidget):
+    def __init__(self, config_manager, shortcut_manager):
+        super().__init__()
+        self.config_manager = config_manager
+        self.shortcut_manager = shortcut_manager
+        self._exiting_flag = False
 
-class GameChecklistApp:
-    def __init__(self):
-        self.config_manager = ConfigManager()
-        self.root = tk.Tk()
-        self._exiting_flag = False 
-
-        self._drag_offset_x = 0
-        self._drag_offset_y = 0
+        # Dragging and Resizing State
+        self._drag_offset = QPoint()
         self._is_dragging = False
         self._is_resizing = False
-        self._current_resize_mode = None
-        
-        self._resize_start_x_root = 0
-        self._resize_start_y_root = 0
-        self._resize_start_width = 0
-        self._resize_start_height = 0
-        self._resize_start_win_x = 0
-        self._resize_start_win_y = 0
+        self._current_resize_edge = None # "left", "right", "top", "bottom", "top_left", ...
+
+        self._resize_start_geometry = QRect()
+        self._resize_start_mouse_pos = QPoint()
 
         self.min_width = int(self.config_manager.get("window.min_width", 100))
         self.min_height = int(self.config_manager.get("window.min_height", 50))
-        self._peek_timer = None
+        self._peek_timer = QTimer(self)
+        self._peek_timer.setSingleShot(True)
+        self._peek_timer.timeout.connect(self._hide_after_peek_action)
 
-        # --- Main UI Structure (CREATE UI ELEMENTS FIRST) ---
-        self.main_content_frame = tk.Frame(self.root, 
-                                          bg=self.config_manager.get("appearance.background_color"))
-        self.main_content_frame.pack(fill=tk.BOTH, expand=True)
+        self._setup_ui()
+        self._apply_initial_window_settings()
+        self._connect_shortcuts()
 
+        # Enable mouse tracking to get move events even when no button is pressed (for cursor changes)
+        self.setMouseTracking(True)
+        self.main_content_widget.setMouseTracking(True) # Also for child absorbing events
+        self.main_label.setMouseTracking(True)
+
+
+    def _setup_ui(self):
+        # Main window flags
+        flags = Qt.FramelessWindowHint | Qt.WindowDoesNotAcceptFocus
+        if self.config_manager.get("window.always_on_top"):
+            flags |= Qt.WindowStaysOnTopHint
+        self.setWindowFlags(flags)
+
+        # For custom painting of background for transparency
+        self.setAttribute(Qt.WA_TranslucentBackground, True)
+        
+        # Overall window opacity
+        opacity = float(self.config_manager.get("appearance.transparency", 0.85))
+        self.setWindowOpacity(opacity)
+
+        # Layout
+        self.main_layout = QVBoxLayout(self)
+        self.main_layout.setContentsMargins(0, 0, 0, 0) # No margins for the main layout itself
+
+        # Content Widget (for background distinct from window transparency effects if needed)
+        self.main_content_widget = QWidget(self)
+        content_bg_color = self.config_manager.get("appearance.content_background_color", "#3C3C3C")
+        text_color = self.config_manager.get("appearance.text_color", "#FFFFFF")
+        font_family = self.config_manager.get("appearance.font_family", "Arial")
+        font_size = int(self.config_manager.get("appearance.font_size", 10))
+        
+        self.main_content_widget.setStyleSheet(f"""
+            QWidget {{
+                background-color: {content_bg_color};
+                color: {text_color};
+                border: none; /* Ensure no default border interferes with custom drawing */
+            }}
+        """)
+        
+        content_layout = QVBoxLayout(self.main_content_widget)
+        content_layout.setContentsMargins(5,5,5,5) # Padding inside the content
+
+        # Main label
         exit_shortcut_str = self.config_manager.get("shortcuts.exit_application", "Ctrl+Shift+Q")
-        self.main_label = tk.Label(self.main_content_frame, 
-                                   text=f"Overlay Initializing... ({exit_shortcut_str} to Exit)",
-                                   fg=self.config_manager.get("appearance.text_color"),
-                                   bg=self.config_manager.get("appearance.background_color"),
-                                   font=(self.config_manager.get("appearance.font_family"),
-                                         self.config_manager.get("appearance.font_size"))
-                                  )
-        self.main_label.pack(padx=10, pady=10, fill=tk.BOTH, expand=True)
+        self.main_label = QLabel(f"Overlay Initializing...\n({exit_shortcut_str} to Exit)", self.main_content_widget)
+        self.main_label.setFont(QFont(font_family, font_size))
+        self.main_label.setAlignment(Qt.AlignCenter)
+        self.main_label.setWordWrap(True)
+        self.main_label.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
 
-        # --- Apply Geometry and Appearance Settings ---
-        self._apply_initial_window_geometry()
-        self._apply_appearance_settings()
-        
-        self._setup_window_management()
-        self._initial_setup_complete = False
+        content_layout.addWidget(self.main_label)
+        self.main_layout.addWidget(self.main_content_widget)
+        self.setLayout(self.main_layout)
 
-        # --- Shortcut Manager Setup ---
-        app_controls = {
-            "toggle_visibility": self.toggle_visibility, # Make sure these methods exist
-            "peek_visibility": self.peek_visibility,     # Make sure these methods exist
-            "exit_application": self.exit_application    # Make sure these methods exist
-        }
-        self.shortcut_manager = ShortcutManager(self.config_manager, app_controls)
-        
-        self.root.protocol("WM_DELETE_WINDOW", self.exit_application)
 
-    def _apply_initial_window_geometry(self):
-        screen_width = self.root.winfo_screenwidth()
-        
-        width_conf = self.config_manager.get("window.last_width") \
-            if self.config_manager.get("window.remember_size") and \
-               self.config_manager.get("window.last_width") is not None \
-            else self.config_manager.get("window.initial_width")
-        width = max(int(width_conf), self.min_width)
-        
-        height_conf = self.config_manager.get("window.last_height") \
-            if self.config_manager.get("window.remember_size") and \
-               self.config_manager.get("window.last_height") is not None \
-            else self.config_manager.get("window.initial_height", 200)
-        height = max(int(height_conf), self.min_height)
+    def _apply_initial_window_settings(self):
+        # Geometry
+        primary_screen = QApplication.primaryScreen()
+        if not primary_screen:
+            print("Error: Could not get primary screen.")
+            # Fallback defaults if screen info isn't available
+            screen_width, screen_height = 1920, 1080 
+        else:
+            screen_geometry = primary_screen.availableGeometry() # Use available to avoid taskbars etc.
+            screen_width = screen_geometry.width()
+            screen_height = screen_geometry.height()
 
+        width = self.min_width
+        if self.config_manager.get("window.remember_size") and \
+           self.config_manager.get("window.last_width") is not None:
+            width = max(int(self.config_manager.get("window.last_width")), self.min_width)
+        else:
+            width = max(int(self.config_manager.get("window.initial_width")), self.min_width)
+
+        height = self.min_height
+        if self.config_manager.get("window.remember_size") and \
+           self.config_manager.get("window.last_height") is not None:
+            height = max(int(self.config_manager.get("window.last_height")), self.min_height)
+        else:
+            height = max(int(self.config_manager.get("window.initial_height", 200)), self.min_height)
+        
+        x, y = 0,0
         if self.config_manager.get("window.remember_position") and \
            self.config_manager.get("window.last_x") is not None and \
            self.config_manager.get("window.last_y") is not None:
             x = int(self.config_manager.get("window.last_x"))
             y = int(self.config_manager.get("window.last_y"))
         else:
-            x_offset = int(self.config_manager.get("window.initial_x_offset_from_right"))
-            y_offset = int(self.config_manager.get("window.initial_y_offset_from_top"))
+            x_offset = int(self.config_manager.get("window.initial_x_offset_from_right", 10))
+            y_offset = int(self.config_manager.get("window.initial_y_offset_from_top", 10))
             x = screen_width - width - x_offset
             y = y_offset
             if self.config_manager.get("window.remember_position"):
-                if self.config_manager.get("window.last_x") is None: self.config_manager.set("window.last_x", x)
-                if self.config_manager.get("window.last_y") is None: self.config_manager.set("window.last_y", y)
-
-        if self.config_manager.get("window.remember_size"):
-            if self.config_manager.get("window.last_width") is None: self.config_manager.set("window.last_width", width)
-            if self.config_manager.get("window.last_height") is None: self.config_manager.set("window.last_height", height)
+                self.config_manager.set("window.last_x", x) # Save initial calculated if not remembered
+                self.config_manager.set("window.last_y", y)
         
-        self.root.geometry(f"{width}x{height}+{x}+{y}")
-        if self.config_manager.get("window.always_on_top"): self.root.attributes("-topmost", True)
-        self.root.overrideredirect(True)
+        if self.config_manager.get("window.remember_size"):
+             if self.config_manager.get("window.last_width") is None: self.config_manager.set("window.last_width", width)
+             if self.config_manager.get("window.last_height") is None: self.config_manager.set("window.last_height", height)
 
-    def _apply_appearance_settings(self):
-        self.root.configure(bg=self.config_manager.get("appearance.background_color"))
-        alpha = self.config_manager.get("appearance.transparency", 0.85)
-        try:
-            self.root.attributes("-alpha", float(alpha))
-            print(f"Set window -alpha to {alpha}")
-        except Exception as e: # Catch broader errors for safety
-            print(f"Warning: Could not set window transparency (-alpha): {e}. Using opaque.")
-            self.root.attributes("-alpha", 1.0)
+        self.setGeometry(x, y, width, height)
 
-        self.main_content_frame.configure(bg=self.config_manager.get("appearance.background_color"))
-        self.root.update_idletasks()
+    def _connect_shortcuts(self):
+        self.shortcut_manager.toggle_visibility_requested.connect(self.toggle_visibility)
+        self.shortcut_manager.peek_visibility_requested.connect(self.peek_visibility)
+        self.shortcut_manager.exit_application_requested.connect(self.exit_application)
 
-    def _get_resize_mode(self, event_x, event_y, win_width, win_height):
-        on_left = abs(event_x) < RESIZE_MARGIN; on_right = abs(event_x - win_width) < RESIZE_MARGIN
-        on_top = abs(event_y) < RESIZE_MARGIN; on_bottom = abs(event_y - win_height) < RESIZE_MARGIN
+    # --- Event Handlers for Dragging, Resizing, Cursor ---
+    def mousePressEvent(self, event):
+        if event.button() == Qt.LeftButton:
+            self._current_resize_edge = self._get_resize_edge(event.position().toPoint())
+            if self._current_resize_edge:
+                self._is_resizing = True
+                self._is_dragging = False
+                self._resize_start_geometry = self.geometry()
+                self._resize_start_mouse_pos = event.globalPosition().toPoint()
+                self.setCursor(CURSOR_MAP.get(self._current_resize_edge_to_cursor_type(self._current_resize_edge), Qt.ArrowCursor))
+            else:
+                self._is_dragging = True
+                self._is_resizing = False
+                self._drag_offset = event.globalPosition().toPoint() - self.frameGeometry().topLeft()
+            event.accept()
+
+    def mouseMoveEvent(self, event):
+        if self._is_resizing:
+            if event.buttons() & Qt.LeftButton:
+                delta = event.globalPosition().toPoint() - self._resize_start_mouse_pos
+                new_geom = QRect(self._resize_start_geometry)
+
+                if "left" in self._current_resize_edge:
+                    new_w = max(self.min_width, new_geom.width() - delta.x())
+                    new_geom.setLeft(new_geom.right() - new_w)
+                elif "right" in self._current_resize_edge:
+                    new_geom.setWidth(max(self.min_width, new_geom.width() + delta.x()))
+                
+                if "top" in self._current_resize_edge:
+                    new_h = max(self.min_height, new_geom.height() - delta.y())
+                    new_geom.setTop(new_geom.bottom() - new_h)
+                elif "bottom" in self._current_resize_edge:
+                    new_geom.setHeight(max(self.min_height, new_geom.height() + delta.y()))
+                
+                self.setGeometry(new_geom)
+            event.accept()
+        elif self._is_dragging:
+            if event.buttons() & Qt.LeftButton:
+                self.move(event.globalPosition().toPoint() - self._drag_offset)
+            event.accept()
+        else: # Not dragging or resizing, just hovering: update cursor
+            edge = self._get_resize_edge(event.position().toPoint())
+            cursor_type_str = self._current_resize_edge_to_cursor_type(edge)
+            self.setCursor(CURSOR_MAP.get(cursor_type_str, Qt.ArrowCursor))
+            event.accept()
+
+
+    def mouseReleaseEvent(self, event):
+        if event.button() == Qt.LeftButton:
+            action_taken = False
+            if self._is_resizing:
+                self._is_resizing = False
+                action_taken = True
+                if self.config_manager.get("window.remember_size"):
+                    self.config_manager.set("window.last_width", self.width())
+                    self.config_manager.set("window.last_height", self.height())
+                # If resizing from left/top edges, position also changes
+                if self.config_manager.get("window.remember_position") and \
+                   ("left" in self._current_resize_edge or "top" in self._current_resize_edge):
+                    self.config_manager.set("window.last_x", self.x())
+                    self.config_manager.set("window.last_y", self.y())
+
+            elif self._is_dragging:
+                self._is_dragging = False
+                action_taken = True
+                if self.config_manager.get("window.remember_position"):
+                    self.config_manager.set("window.last_x", self.x())
+                    self.config_manager.set("window.last_y", self.y())
+            
+            self._current_resize_edge = None
+            if action_taken:
+                 # Update cursor based on current position after action
+                current_edge = self._get_resize_edge(event.position().toPoint())
+                self.setCursor(CURSOR_MAP.get(self._current_resize_edge_to_cursor_type(current_edge), Qt.ArrowCursor))
+
+            event.accept()
+
+
+    def _get_resize_edge(self, pos: QPoint):
+        r_margin, b_margin = RESIZE_MARGIN, RESIZE_MARGIN 
+        on_left = pos.x() < r_margin
+        on_right = pos.x() > self.width() - r_margin
+        on_top = pos.y() < r_margin
+        on_bottom = pos.y() > self.height() - b_margin
+
         if on_left and on_top: return "top_left"
         if on_right and on_top: return "top_right"
         if on_left and on_bottom: return "bottom_left"
@@ -134,159 +246,148 @@ class GameChecklistApp:
         if on_bottom: return "bottom"
         return None
 
-    def _update_cursor(self, event_x_rel, event_y_rel):
-        if self._is_dragging or self._is_resizing: return
-        win_width = self.root.winfo_width(); win_height = self.root.winfo_height()
-        resize_mode = self._get_resize_mode(event_x_rel, event_y_rel, win_width, win_height)
-        new_cursor = CURSOR_DEFAULT
-        if resize_mode:
-            if resize_mode in ["left", "right"]: new_cursor = CURSOR_RESIZE_H
-            elif resize_mode in ["top", "bottom"]: new_cursor = CURSOR_RESIZE_V
-            elif resize_mode in ["top_left", "bottom_right"]: new_cursor = CURSOR_RESIZE_TL_BR
-            elif resize_mode in ["top_right", "bottom_left"]: new_cursor = CURSOR_RESIZE_TR_BL
-        if self.root.cget("cursor") != new_cursor: self.root.config(cursor=new_cursor)
+    def _current_resize_edge_to_cursor_type(self, edge_str):
+        if not edge_str: return "arrow"
+        if edge_str in ["left", "right"]: return "size_h"
+        if edge_str in ["top", "bottom"]: return "size_v"
+        if edge_str in ["top_left", "bottom_right"]: return "size_tl_br"
+        if edge_str in ["top_right", "bottom_left"]: return "size_tr_bl"
+        return "arrow"
+        
+    # Required for WA_TranslucentBackground if we want a specific background color
+    # that isn't just full transparency.
+    # If main_content_widget covers the whole area and has its own BG,
+    # this paintEvent for the main window might only be needed for truly custom shapes
+    # or if the content widget doesn't fill it / has margins showing window bg.
+    # For now, we let main_content_widget handle its background.
+    # If window opacity is < 1, this color will also be semi-transparent.
+    def paintEvent(self, event):
+        # If you want the window itself to have a base color before widgets are drawn on top,
+        # or if content_widget doesn't fill the whole area.
+        # painter = QPainter(self)
+        # window_bg_color_str = self.config_manager.get("appearance.background_color", "#00000000") # default to transparent black
+        # window_bg_color = QColor(window_bg_color_str)
+        # painter.fillRect(self.rect(), window_bg_color) # This color will be affected by setWindowOpacity
+        
+        # If main_content_widget handles all visuals, this might not be needed
+        # or could be used for custom borders if desired.
+        super().paintEvent(event) # Important if there are child widgets that need painting.
 
-    def _setup_window_management(self):
-        self.root.bind("<ButtonPress-1>", self._on_root_mouse_press)
-        self.root.bind("<B1-Motion>", self._on_root_mouse_motion)
-        self.root.bind("<ButtonRelease-1>", self._on_root_mouse_release)
-        self.root.bind("<Motion>", self._on_root_mouse_hover)
-        self.root.bind("<Leave>", self._on_root_mouse_leave)
-
-    def _on_root_mouse_hover(self, event): self._update_cursor(event.x, event.y)
-    def _on_root_mouse_leave(self, event):
-        if not self._is_resizing and not self._is_dragging: self.root.config(cursor=CURSOR_DEFAULT)
-
-    def _on_root_mouse_press(self, event):
-        win_width = self.root.winfo_width(); win_height = self.root.winfo_height()
-        self._current_resize_mode = self._get_resize_mode(event.x, event.y, win_width, win_height)
-        if self._current_resize_mode:
-            self._is_resizing = True; self._is_dragging = False
-            self._resize_start_x_root, self._resize_start_y_root = event.x_root, event.y_root
-            self._resize_start_width, self._resize_start_height = win_width, win_height
-            self._resize_start_win_x, self._resize_start_win_y = self.root.winfo_x(), self.root.winfo_y()
-        else:
-            self._is_dragging = True; self._is_resizing = False
-            self._drag_offset_x, self._drag_offset_y = event.x, event.y
-
-    def _on_root_mouse_motion(self, event):
-        if self._is_resizing:
-            dx_root = event.x_root - self._resize_start_x_root; dy_root = event.y_root - self._resize_start_y_root
-            nx, ny = self._resize_start_win_x, self._resize_start_win_y
-            nw, nh = self._resize_start_width, self._resize_start_height
-            if "left" in self._current_resize_mode: nw = max(self.min_width, self._resize_start_width - dx_root); nx = self._resize_start_win_x + (self._resize_start_width - nw)
-            elif "right" in self._current_resize_mode: nw = max(self.min_width, self._resize_start_width + dx_root)
-            if "top" in self._current_resize_mode: nh = max(self.min_height, self._resize_start_height - dy_root); ny = self._resize_start_win_y + (self._resize_start_height - nh)
-            elif "bottom" in self._current_resize_mode: nh = max(self.min_height, self._resize_start_height + dy_root)
-            self.root.geometry(f"{int(nw)}x{int(nh)}+{int(nx)}+{int(ny)}")
-        elif self._is_dragging:
-            nx = event.x_root - self._drag_offset_x; ny = event.y_root - self._drag_offset_y
-            self.root.geometry(f"+{int(nx)}+{int(ny)}")
-
-    def _on_root_mouse_release(self, event):
-        action = False
-        if self._is_resizing:
-            self._is_resizing = False; action = True; self._current_resize_mode = None
-            if self.config_manager.get("window.remember_size"):
-                self.config_manager.set("window.last_width", self.root.winfo_width())
-                self.config_manager.set("window.last_height", self.root.winfo_height())
-            if self.config_manager.get("window.remember_position"): # L/T resize moves window
-                self.config_manager.set("window.last_x", self.root.winfo_x())
-                self.config_manager.set("window.last_y", self.root.winfo_y())
-        elif self._is_dragging:
-            self._is_dragging = False; action = True
-            if self.config_manager.get("window.remember_position"):
-                self.config_manager.set("window.last_x", self.root.winfo_x())
-                self.config_manager.set("window.last_y", self.root.winfo_y())
-        if action: self._update_cursor(event.x, event.y)
-
-    def _schedule_on_main_thread(self, func, *args):
-        if threading.current_thread() != threading.main_thread(): self.root.after(0, func, *args)
-        else: func(*args)
-
+    # --- Visibility Control Slots ---
     def toggle_visibility(self):
-        def _toggle():
-            if self.root.winfo_viewable(): self.root.withdraw(); print("Overlay hidden.")
-            else: self.root.deiconify(); self.root.attributes("-topmost", True); print("Overlay shown.")
-        self._schedule_on_main_thread(_toggle)
+        if self._exiting_flag: return
+        if self.isVisible():
+            self.hide()
+            print("Overlay hidden.")
+            if self._peek_timer.isActive():
+                self._peek_timer.stop()
+        else:
+            self.show()
+            # Ensure it's on top again if it was hidden
+            if self.config_manager.get("window.always_on_top"):
+                self.setWindowFlag(Qt.WindowStaysOnTopHint, True)
+            self.activateWindow() # Try to bring to front
+            self.raise_()
+            print("Overlay shown.")
 
     def peek_visibility(self):
-        def _peek():
-            duration_ms = int(self.config_manager.get("shortcuts.peek_duration_seconds", 3) * 1000)
-            if self._peek_timer: self.root.after_cancel(self._peek_timer); self._peek_timer = None
-            if not self.root.winfo_viewable():
-                self.root.deiconify(); self.root.attributes("-topmost", True); print("Overlay peek: shown.")
-                self._peek_timer = self.root.after(duration_ms, self._hide_after_peek_action)
-            elif self.root.winfo_viewable():
-                 print("Overlay peek: already visible, restarting timer.")
-                 self._peek_timer = self.root.after(duration_ms, self._hide_after_peek_action)
-        self._schedule_on_main_thread(_peek)
+        if self._exiting_flag: return
+        duration_ms = int(self.config_manager.get("shortcuts.peek_duration_seconds", 3) * 1000)
+        
+        if not self.isVisible():
+            self.show()
+            if self.config_manager.get("window.always_on_top"):
+                self.setWindowFlag(Qt.WindowStaysOnTopHint, True)
+            self.activateWindow()
+            self.raise_()
+            print("Overlay peek: shown.")
+        else:
+            print("Overlay peek: already visible, restarting timer.")
+            
+        self._peek_timer.start(duration_ms)
 
     def _hide_after_peek_action(self):
-        if self.root.winfo_viewable(): self.root.withdraw(); print("Overlay peek: auto-hidden.")
-        self._peek_timer = None # Clear timer ref after it fires and action is done
+        if self.isVisible():
+            self.hide()
+            print("Overlay peek: auto-hidden.")
 
     def exit_application(self):
-        if self._exiting_flag: return
+        if self._exiting_flag:
+            return
         self._exiting_flag = True
-        print("Exit application initiated.")
-        def _actual_exit_sequence():
-            print("App Info: Stopping shortcut listener...")
-            if hasattr(self, 'shortcut_manager') and self.shortcut_manager: self.shortcut_manager.stop_listening()
-            print("App Info: Cancelling Tkinter timers...")
-            if hasattr(self, '_peek_timer') and self._peek_timer:
-                try:
-                    if self.root.winfo_exists(): self.root.after_cancel(self._peek_timer)
-                except tk.TclError: pass 
-                self._peek_timer = None
-            print("App Info: Shutting down Tkinter...")
-            try:
-                if hasattr(self, 'root') and self.root and self.root.winfo_exists():
-                    self.root.quit(); self.root.destroy()
-                    print("App Info: Tkinter shutdown complete.")
-            except tk.TclError: print("App Warning: Error during Tkinter shutdown (already destroyed?).")
-            print("App Info: Python script exit sequence finished.")
-            print("App Info: Pausing briefly before final sys.exit...")
-            time.sleep(0.1) 
-            print("App Info: Forcing process exit now via sys.exit(0).")
-            sys.exit(0)
-        
-        # Try to schedule on main thread, but if root is gone, execute directly critical parts
-        if hasattr(self, 'root') and self.root and getattr(self.root, 'after', None) and self.root.winfo_exists():
-             self._schedule_on_main_thread(_actual_exit_sequence)
-        else:
-            print("Tkinter root not fully available for scheduled exit, attempting direct critical cleanup.")
-            if hasattr(self, 'shortcut_manager') and self.shortcut_manager: self.shortcut_manager.stop_listening()
-            print("Direct cleanup finished. Forcing process exit.")
-            sys.exit(0)
+        print("Exit application initiated by shortcut/signal.")
+        self.close() # This will trigger closeEvent
 
-    def run(self):
-        try:
-            self.root.update_idletasks()
-            self._initial_setup_complete = True
-            if hasattr(self, 'shortcut_manager') and self.shortcut_manager: self.shortcut_manager.start_listening()
-            print("Starting Tkinter mainloop...")
-            self.root.mainloop()
-            print("Tkinter mainloop naturally finished.")
-        except KeyboardInterrupt: print("KeyboardInterrupt (Ctrl+C) by main thread.")
-        except tk.TclError as e:
-            if "application has been destroyed" in str(e).lower(): print(f"Mainloop interrupted (app destroyed): {e}")
-            else: print(f"Unexpected TclError in mainloop: {e}")
-        except Exception as e: print(f"Unexpected error in run method: {e}")
-        finally:
-            print("Run method's finally block: ensuring application exit.")
-            self.exit_application()
+    def closeEvent(self, event):
+        print("OverlayWindow.closeEvent() called.")
+        if self._exiting_flag: # Already in shutdown
+            event.accept()
+            QApplication.instance().quit() # Ensure app quits
+            return
+
+        self._exiting_flag = True # Mark as exiting
+        print("App Info: Stopping shortcut listener...")
+        if self.shortcut_manager:
+            self.shortcut_manager.stop_listening()
+        
+        print("App Info: Cancelling timers...")
+        if self._peek_timer and self._peek_timer.isActive():
+            self._peek_timer.stop()
+        
+        print("App Info: Closing PySide6 application window.")
+        event.accept() # Accept the close event
+        
+        # Ensure the application instance quits
+        # Sometimes QApplication.instance().quit() needs to be called explicitly after event loop processing
+        QTimer.singleShot(50, QApplication.instance().quit) # Allow event queue to clear
+        print("App Info: QApplication.instance().quit() scheduled.")
+
 
 if __name__ == "__main__":
+    # Ensure NLTK 'punkt' is available
     try:
         import nltk
         nltk.data.find('tokenizers/punkt')
         print("NLTK 'punkt' tokenizer found.")
     except LookupError:
         print("NLTK 'punkt' tokenizer not found. Attempting to download...")
-        try: nltk.download('punkt', quiet=True); print("'punkt' tokenizer downloaded.")
-        except Exception as e: print(f"Error downloading 'punkt': {e}.")
-    except ImportError: print("NLTK library not found. Please install it: pip install nltk")
+        try:
+            nltk.download('punkt', quiet=True)
+            nltk.data.find('tokenizers/punkt') # Verify after download
+            print("'punkt' tokenizer downloaded and verified.")
+        except Exception as e:
+            print(f"Error downloading or verifying 'punkt': {e}. Please install manually or check network.")
+            sys.exit(1) # Critical for task parsing later
+    except ImportError:
+        print("NLTK library not found. Please install it: pip install nltk")
+        sys.exit(1)
 
-    app = GameChecklistApp()
-    app.run()
+    # For HiDPI displays, if needed
+    # QApplication.setAttribute(Qt.AA_EnableHighDpiScaling)
+    # QApplication.setAttribute(Qt.AA_UseHighDpiPixmaps)
+
+    app = QApplication(sys.argv)
+
+    config_mgr = ConfigManager()
+    shortcut_mgr = ShortcutManager(config_mgr)
+    
+    overlay_window = OverlayWindow(config_mgr, shortcut_mgr)
+    overlay_window.show() # Initially show the window, shortcuts will control visibility after
+    
+    # Start listening for shortcuts AFTER the window is created and shown (or ready)
+    # to ensure all Qt setup is complete for signal/slot connections.
+    shortcut_mgr.start_listening()
+
+    exit_code = app.exec()
+    print(f"Application exiting with code: {exit_code}")
+    
+    # Ensure final cleanup, pynput thread might keep script alive otherwise.
+    if shortcut_mgr:
+        shortcut_mgr.stop_listening() # Final attempt to stop
+    
+    # A small delay for any cleanup threads to finish, then force exit.
+    # This is a bit aggressive but can help if pynput listener doesn't terminate cleanly.
+    # Python's main thread might exit, but daemon threads from pynput could hang.
+    # time.sleep(0.2) 
+    # print("Forcing sys.exit after main loop.")
+    sys.exit(exit_code)
