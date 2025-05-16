@@ -9,12 +9,12 @@ APP_AUTHOR = "GameChecklistOverlayDev"
 DEFAULT_CONFIG = {
     "appearance": {
         "theme": "dark",
-        "background_color": "#2E2E2E",
-        "content_background_color": "#3C3C3C",
-        "text_color": "#FFFFFF",
+        "background_color": "#1A1A1A",
+        "content_background_color": "#1F1F1F",
+        "text_color": "#E0E0E0",
         "font_family": "Arial", 
         "font_size": 10,
-        "transparency": 0.85
+        "transparency": 0.70
     },
     "window": {
         "initial_width": 250,
@@ -230,4 +230,4 @@ class ConfigManager:
         Returns:
             A dictionary representing the current configuration.
         """
-        return copy.deepcopy(self.config) # Return a deepcopy to prevent external modification
+        return copy.deepcopy(self.config)

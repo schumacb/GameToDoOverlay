@@ -1,5 +1,5 @@
 from PySide6.QtWidgets import QWidget, QVBoxLayout, QLabel, QScrollArea, QFrame, QCheckBox, QHBoxLayout, QSizePolicy
-from PySide6.QtCore import Qt, Signal, Slot # Import Slot
+from PySide6.QtCore import Qt, Signal, Slot
 from PySide6.QtGui import QFont
 
 from typing import TYPE_CHECKING
@@ -14,7 +14,7 @@ class TaskListView(QWidget):
     and handles scrolling. It emits a signal when a step's completion
     status is changed by the user.
     """
-    step_completion_changed = Signal(str, str, bool) # task_id, step_id, is_completed
+    step_completion_changed = Signal(str, str, bool)
 
     def __init__(self, config_manager: 'ConfigManager', parent: QWidget = None):
         """
@@ -38,7 +38,7 @@ class TaskListView(QWidget):
         self.scroll_area.setWidgetResizable(True)
         self.scroll_area.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         self.scroll_area.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
-        bg_color = self.config_manager.get("appearance.content_background_color", "#3C3C3C")
+        bg_color = self.config_manager.get("appearance.content_background_color")
         self.scroll_area.setStyleSheet(f"""
             QScrollArea {{ 
                 background-color: {bg_color}; 
@@ -80,11 +80,14 @@ class TaskListView(QWidget):
         """
         self._clear_task_widgets()
 
-        font_family = self.config_manager.get("appearance.font_family", "Arial")
-        font_size = int(self.config_manager.get("appearance.font_size", 10))
-        text_color = self.config_manager.get("appearance.text_color", "#FFFFFF")
-        checkbox_border_color = "#888888" 
+        font_family = self.config_manager.get("appearance.font_family")
+        font_size = int(self.config_manager.get("appearance.font_size"))
+        text_color = self.config_manager.get("appearance.text_color")
         
+        checkbox_border_color_unchecked = "#707070" 
+        checkbox_border_color_checked = "#5090D0"   
+        checkbox_bg_color_checked = "#4070A0"       
+
         if not tasks_data:
             no_tasks_label = QLabel("No tasks. Focus and Ctrl+V to paste.", self.tasks_container_widget)
             no_tasks_label.setFont(QFont(font_family, font_size))
@@ -126,11 +129,16 @@ class TaskListView(QWidget):
                 checkbox.setStyleSheet(f"""
                     QCheckBox::indicator {{ 
                         width: 13px; height: 13px; 
-                        border: 1px solid {checkbox_border_color}; 
+                        border: 1px solid {checkbox_border_color_unchecked}; 
                         border-radius: 3px;
+                        background-color: transparent; 
                     }}
                     QCheckBox::indicator:checked {{
-                        background-color: #55AAFF; 
+                        background-color: {checkbox_bg_color_checked}; 
+                        border: 1px solid {checkbox_border_color_checked};
+                    }}
+                    QCheckBox::indicator:unchecked {{
+                        background-color: transparent;
                     }}
                     QCheckBox {{ color: {text_color}; }} 
                 """)
@@ -152,9 +160,6 @@ class TaskListView(QWidget):
             task_group_frame_layout.addWidget(steps_container)
             self.tasks_layout.addWidget(task_group_frame)
 
-    # This method is a slot, so it should be decorated with @Slot if type hinting its arguments
-    # for stricter connection checks, or no decorator if not strictly needed for simple cases.
-    # The QCheckBox.stateChanged signal emits an int (the Qt.CheckState enum value).
     @Slot(int) 
     def _on_step_checkbox_changed(self, state: int):
         """
