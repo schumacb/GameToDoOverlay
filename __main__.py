@@ -1,18 +1,19 @@
 import sys
 import uuid
 from datetime import datetime
-import nltk # For sentence tokenization
+import nltk 
 
 from PySide6.QtWidgets import QApplication, QWidget, QVBoxLayout, QLabel, QSizePolicy
 from PySide6.QtCore import Qt, QPoint, QTimer, QRect, QEvent
 from PySide6.QtGui import QFont, QScreen, QCursor, QKeyEvent, QClipboard, QMouseEvent
 
-from config_manager import ConfigManager
+from config_manager import ConfigManager, APP_NAME, APP_AUTHOR # Import APP_NAME, APP_AUTHOR
 from shortcut_manager import ShortcutManager
+from task_manager import TaskManager # Import TaskManager
 
 # Constants for window resizing behavior
-RESIZE_MARGIN = 8 # Pixel margin around edges for detecting resize intent
-CURSOR_MAP = { # Mapping of resize edge identifiers to Qt.CursorShape
+RESIZE_MARGIN = 8 
+CURSOR_MAP = { 
     "arrow": Qt.ArrowCursor,
     "size_h": Qt.SizeHorCursor,
     "size_v": Qt.SizeVerCursor,
@@ -27,17 +28,19 @@ class OverlayWindow(QWidget):
     It supports dragging, resizing, and visibility control via global shortcuts,
     and task input via Ctrl+V when focused.
     """
-    def __init__(self, config_manager: ConfigManager, shortcut_manager: ShortcutManager):
+    def __init__(self, config_manager: ConfigManager, shortcut_manager: ShortcutManager, task_manager: TaskManager):
         """
         Initializes the OverlayWindow.
 
         Args:
             config_manager: Instance of ConfigManager for loading/saving settings.
             shortcut_manager: Instance of ShortcutManager for global hotkey bindings.
+            task_manager: Instance of TaskManager for handling task data.
         """
         super().__init__()
         self.config_manager = config_manager
         self.shortcut_manager = shortcut_manager
+        self.task_manager = task_manager # Store the task manager instance
         self._exiting_flag = False
 
         self._drag_offset = QPoint()
@@ -54,11 +57,13 @@ class OverlayWindow(QWidget):
         self._peek_timer.setSingleShot(True)
         self._peek_timer.timeout.connect(self._hide_after_peek_action)
 
-        self.tasks_data = [] # This will be a list of main task dictionaries, each containing steps
+        # Load initial tasks from the TaskManager
+        self.tasks_data = self.task_manager.get_all_tasks() 
 
         self._setup_ui()
         self._apply_initial_window_settings()
         self._connect_shortcuts()
+        self._update_main_label_with_task_count() # Initial label update
 
         self.setMouseTracking(True)
         if self.main_content_widget: self.main_content_widget.setMouseTracking(True)
@@ -101,9 +106,10 @@ class OverlayWindow(QWidget):
         content_layout = QVBoxLayout(self.main_content_widget)
         content_layout.setContentsMargins(5,5,5,5)
 
-        exit_shortcut_str = self.config_manager.get("shortcuts.exit_application", "Ctrl+Shift+Q")
+        self.exit_shortcut_str = self.config_manager.get("shortcuts.exit_application", "Ctrl+Shift+Q")
         self.main_label = QLabel(
-            f"Overlay Initialized. Focus and Ctrl+V to paste tasks.\n({exit_shortcut_str} to Exit)", 
+            # Initial text will be updated by _update_main_label_with_task_count
+            "", 
             self.main_content_widget
         )
         self.main_label.setFont(QFont(font_family, font_size))
@@ -189,38 +195,32 @@ class OverlayWindow(QWidget):
     def _parse_and_load_tasks(self, text_block: str):
         """
         Parses a block of text into main tasks and their steps.
-        Each line from the pasted text becomes a main task.
-        Sentences within each line become individual steps for that task.
-        The self.tasks_data attribute will store a list of main task dictionaries.
+        The parsed tasks are then passed to the TaskManager to be saved.
         """
         print("Parsing tasks...")
-        self.tasks_data = [] # List of main task dictionaries
+        parsed_tasks_list = [] # Temporary list for newly parsed tasks
         lines = text_block.strip().splitlines()
         current_time = datetime.now()
-        total_steps_count = 0
-
+        
         for line_content in lines:
             if not line_content.strip(): 
                 continue
             
-            task_id_str = str(uuid.uuid4()) # Unique ID for the main task
-            task_title_str = line_content.strip() # The original pasted line is the task title
+            task_id_str = str(uuid.uuid4()) 
+            task_title_str = line_content.strip() 
             
             current_main_task = {
                 "task_id": task_id_str,
                 "task_title": task_title_str,
                 "created_timestamp": current_time, 
-                "steps": [] # List of step dictionaries for this main task
+                "steps": [] 
             }
             
             try:
-                # Tokenize the task_title (which is the full line) into sentences (steps)
                 sentences = nltk.sent_tokenize(task_title_str) 
             except LookupError as e:
                 print(f"NLTK LookupError tokenizing task: '{task_title_str}'. Error: {e}")
-                print("This might indicate a missing NLTK sub-resource.")
-                print("Ensure NLTK 'punkt' data and its components are downloaded.")
-                sentences = [task_title_str] # Fallback: treat the whole line as a single step
+                sentences = [task_title_str] 
             except Exception as e: 
                 print(f"General error tokenizing task: '{task_title_str}'. Error: {e}")
                 sentences = [task_title_str]
@@ -233,33 +233,40 @@ class OverlayWindow(QWidget):
                     continue
                 
                 step = {
-                    "step_id": str(uuid.uuid4()), # Unique ID for the step
-                    "step_index": i, # Order of the step within the task
+                    "step_id": str(uuid.uuid4()), 
+                    "step_index": i, 
                     "text": sentence_text.strip(),
                     "completed": False,
                     "completed_timestamp": None,
                 }
                 current_main_task["steps"].append(step)
-                total_steps_count += 1
             
-            if current_main_task["steps"]: # Only add the main task if it has steps
-                self.tasks_data.append(current_main_task)
+            if current_main_task["steps"]: 
+                parsed_tasks_list.append(current_main_task)
         
-        print(f"Loaded {len(self.tasks_data)} main tasks with a total of {total_steps_count} steps.")
-        for task_item in self.tasks_data: 
-            print(f"  Task: '{task_item['task_title'][:50]}...' ({len(task_item['steps'])} steps)")
+        # Update TaskManager and then refresh local self.tasks_data
+        self.task_manager.replace_all_tasks(parsed_tasks_list)
+        self.tasks_data = self.task_manager.get_all_tasks() 
         
-        if self.tasks_data:
-            self.main_label.setText(f"{len(self.tasks_data)} tasks loaded. Display coming soon!\n(Ctrl+V to paste new tasks)")
-        else:
-            self.main_label.setText("Pasted text resulted in no tasks.\n(Ctrl+V to paste tasks)")
+        self._update_main_label_with_task_count()
 
+
+    def _update_main_label_with_task_count(self):
+        """Updates the main label to reflect the current number of tasks or initial state."""
+        if self.tasks_data:
+            total_steps = sum(len(task.get('steps', [])) for task in self.tasks_data)
+            self.main_label.setText(
+                f"{len(self.tasks_data)} tasks ({total_steps} steps) loaded.\n"
+                f"Display coming soon! (Ctrl+V for new tasks, {self.exit_shortcut_str} to Exit)"
+            )
+        else:
+            self.main_label.setText(
+                f"No tasks loaded. Focus and Ctrl+V to paste tasks.\n({self.exit_shortcut_str} to Exit)"
+            )
 
     def mousePressEvent(self, event: QMouseEvent):
         """
         Handles mouse button press events.
-        Initiates dragging or resizing based on the mouse position.
-        Also explicitly sets focus to the window on click, aiding paste functionality.
         """
         if not self.hasFocus():
             self.setFocus(Qt.FocusReason.MouseFocusReason)
@@ -282,8 +289,6 @@ class OverlayWindow(QWidget):
     def mouseMoveEvent(self, event: QMouseEvent):
         """
         Handles mouse move events.
-        Performs dragging or resizing if active. Otherwise, updates the cursor shape
-        if hovering over a resize edge.
         """
         if self._is_resizing and (event.buttons() & Qt.LeftButton):
             delta = event.globalPosition().toPoint() - self._resize_start_mouse_pos
@@ -315,7 +320,6 @@ class OverlayWindow(QWidget):
     def mouseReleaseEvent(self, event: QMouseEvent):
         """
         Handles mouse button release events.
-        Finalizes dragging or resizing operations and saves new geometry if configured.
         """
         if event.button() == Qt.LeftButton:
             action_taken = False
@@ -490,7 +494,10 @@ if __name__ == "__main__":
 
     config_mgr = ConfigManager()
     shortcut_mgr = ShortcutManager(config_mgr)
-    overlay_window = OverlayWindow(config_mgr, shortcut_mgr)
+    # Pass APP_NAME and APP_AUTHOR from config_manager to TaskManager
+    task_mgr = TaskManager(APP_NAME, APP_AUTHOR) 
+    
+    overlay_window = OverlayWindow(config_mgr, shortcut_mgr, task_mgr)
     
     overlay_window.show() 
     
