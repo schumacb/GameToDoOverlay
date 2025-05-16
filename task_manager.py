@@ -8,6 +8,8 @@ class TaskManager:
     """
     Manages loading, saving, and handling of task data persisted in a JSON file.
     Handles conversion of datetime objects to/from ISO format strings for JSON serialization.
+    Supports tasks with steps and tasks that are directly checkable.
+    Updating a task's completion will also update all its steps if present.
     """
     def __init__(self, app_name: str, app_author: str):
         """
@@ -19,7 +21,7 @@ class TaskManager:
         """
         self.tasks_file_path = os.path.join(user_config_dir(app_name, app_author), "tasks.json")
         self._ensure_tasks_dir_exists()
-        self.tasks_data = self._load_tasks_from_file() # Load tasks on initialization
+        self.tasks_data = self._load_tasks_from_file() 
 
     def _ensure_tasks_dir_exists(self):
         """Ensures the directory for tasks.json exists."""
@@ -40,14 +42,13 @@ class TaskManager:
         try:
             return datetime.fromisoformat(iso_str)
         except (TypeError, ValueError):
-            # Log error or handle as appropriate if malformed iso_str is critical
             print(f"Warning: Could not parse ISO datetime string: {iso_str}")
             return None
 
     def _load_tasks_from_file(self) -> list:
         """
         Loads tasks from the tasks.json file.
-        Converts timestamp strings back to datetime objects.
+        Converts timestamp strings back to datetime objects for tasks and steps.
         Returns an empty list if the file doesn't exist, is empty, or is malformed.
         """
         if not os.path.exists(self.tasks_file_path) or os.path.getsize(self.tasks_file_path) == 0:
@@ -57,9 +58,14 @@ class TaskManager:
             with open(self.tasks_file_path, 'r') as f:
                 loaded_data = json.load(f)
             
-            # Convert timestamps back to datetime objects
             for task in loaded_data:
                 task['created_timestamp'] = self._iso_to_datetime(task.get('created_timestamp'))
+                if 'completed' not in task: # Ensure older tasks get this field
+                    task['completed'] = False
+                if 'completed_timestamp' not in task: # Ensure older tasks get this field
+                     task['completed_timestamp'] = None
+                task['completed_timestamp'] = self._iso_to_datetime(task.get('completed_timestamp'))
+                
                 for step in task.get('steps', []):
                     step['completed_timestamp'] = self._iso_to_datetime(step.get('completed_timestamp'))
             return loaded_data
@@ -73,18 +79,17 @@ class TaskManager:
     def _save_tasks_to_file(self):
         """
         Saves the current in-memory self.tasks_data to tasks.json.
-        Converts datetime objects to ISO format strings for serialization.
+        Converts datetime objects to ISO format strings for serialization for tasks and steps.
         """
         self._ensure_tasks_dir_exists()
         
-        # Create a temporary copy for serialization to avoid modifying in-memory datetime objects
         data_to_save = copy.deepcopy(self.tasks_data) 
         for task in data_to_save:
             task['created_timestamp'] = self._datetime_to_iso(task.get('created_timestamp'))
+            task['completed_timestamp'] = self._datetime_to_iso(task.get('completed_timestamp'))
+
             for step in task.get('steps', []):
                 step['completed_timestamp'] = self._datetime_to_iso(step.get('completed_timestamp'))
-                # Note: step 'created_timestamp' is not explicitly stored per step, 
-                # it's implicitly the task's created_timestamp.
 
         try:
             with open(self.tasks_file_path, 'w') as f:
@@ -107,7 +112,6 @@ class TaskManager:
         Args:
             new_tasks_list: The new list of task dictionaries to store.
         """
-        # It's good practice to store a deep copy if new_tasks_list might be modified elsewhere
         self.tasks_data = copy.deepcopy(new_tasks_list) 
         self._save_tasks_to_file()
         print(f"Tasks replaced and saved. Current task count: {len(self.tasks_data)}")
@@ -115,14 +119,8 @@ class TaskManager:
     def update_step_completion(self, task_id: str, step_id: str, completed: bool) -> bool:
         """
         Updates the completion status of a specific step within a task.
-
-        Args:
-            task_id: The ID of the main task containing the step.
-            step_id: The ID of the step to update.
-            completed: The new completion status (True or False).
-
-        Returns:
-            True if the step was found and updated, False otherwise.
+        The parent task's own 'completed' status is not directly managed here but
+        will be re-evaluated by TaskListView based on step states.
         """
         task_found = False
         step_updated = False
@@ -134,9 +132,21 @@ class TaskManager:
                         step['completed'] = completed
                         step['completed_timestamp'] = datetime.now() if completed else None
                         step_updated = True
-                        break # Step found and updated
+                        break 
                 if step_updated:
-                    break # Task found and step updated
+                    # Optionally, update the parent task's 'completed' field based on aggregate step status
+                    if task.get('steps'):
+                        all_steps_done = all(s.get('completed', False) for s in task['steps'])
+                        # Task 'completed' field reflects if ALL steps are done.
+                        # A partially completed task is not 'completed': True at the task level.
+                        if all_steps_done:
+                            task['completed'] = True
+                            if task.get('completed_timestamp') is None: # Set timestamp if newly completed
+                                task['completed_timestamp'] = datetime.now()
+                        else:
+                            task['completed'] = False
+                            task['completed_timestamp'] = None # Clear timestamp if not all steps are done
+                    break
         
         if step_updated:
             self._save_tasks_to_file()
@@ -145,6 +155,33 @@ class TaskManager:
         
         if not task_found:
             print(f"Warning: Task with ID '{task_id}' not found for updating step '{step_id}'.")
-        elif not step_updated: # Task found but step not
+        elif not step_updated: 
             print(f"Warning: Step with ID '{step_id}' not found in task '{task_id}'.")
+        return False
+
+    def update_task_completion(self, task_id: str, completed: bool) -> bool:
+        """
+        Updates the completion status of a specific task.
+        If the task has steps, all its steps are also updated to this status.
+        """
+        task_updated = False
+        current_ts = datetime.now() if completed else None
+        for task in self.tasks_data:
+            if task.get('task_id') == task_id:
+                task['completed'] = completed
+                task['completed_timestamp'] = current_ts
+                task_updated = True
+
+                if task.get('steps'): # If task has steps, propagate change to all steps
+                    for step in task['steps']:
+                        step['completed'] = completed
+                        step['completed_timestamp'] = current_ts
+                break 
+        
+        if task_updated:
+            self._save_tasks_to_file()
+            print(f"Task '{task_id}' and its steps (if any) updated to completed: {completed}")
+            return True
+        
+        print(f"Warning: Task with ID '{task_id}' not found for updating completion status.")
         return False

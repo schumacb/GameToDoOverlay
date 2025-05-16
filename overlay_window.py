@@ -25,6 +25,7 @@ class OverlayWindow(QWidget):
     user interactions (drag, resize, paste via Ctrl+V), and coordinates with
     shortcut management, task parsing, task data persistence (TaskManager),
     and the task display component (TaskListView).
+    Handles completion for both tasks with steps and directly checkable tasks.
     """
     def __init__(self, 
                  config_manager: 'ConfigManager', 
@@ -64,11 +65,11 @@ class OverlayWindow(QWidget):
 
         self.tasks_data = self.task_manager.get_all_tasks() 
         
-        self.task_list_view: 'TaskListView' = None # Will be initialized in _setup_ui
+        self.task_list_view: 'TaskListView' = None 
 
         self._setup_ui() 
         self._apply_initial_window_settings()
-        self._connect_signals_and_shortcuts() # Combined signal/shortcut connections
+        self._connect_signals_and_shortcuts() 
         
         if self.task_list_view:
             self.task_list_view.update_display(self.tasks_data)
@@ -103,7 +104,7 @@ class OverlayWindow(QWidget):
         """)
         
         content_area_layout = QVBoxLayout(self.main_content_widget)
-        content_area_layout.setContentsMargins(0,0,0,0) # Let TaskListView handle its own padding
+        content_area_layout.setContentsMargins(0,0,0,0) 
         
         self.task_list_view = TaskListView(self.config_manager, self.main_content_widget)
         content_area_layout.addWidget(self.task_list_view)
@@ -164,6 +165,8 @@ class OverlayWindow(QWidget):
 
         if self.task_list_view:
             self.task_list_view.step_completion_changed.connect(self._handle_step_completion_change)
+            self.task_list_view.task_completion_changed.connect(self._handle_task_completion_change)
+
 
     def keyPressEvent(self, event: QKeyEvent):
         """Handles key press events, specifically Ctrl+V for pasting tasks."""
@@ -196,20 +199,30 @@ class OverlayWindow(QWidget):
         """
         Slot to handle changes in a step's completion status from TaskListView.
         Updates the TaskManager and then refreshes the TaskListView.
-
-        Args:
-            task_id: The ID of the task whose step changed.
-            step_id: The ID of the step that changed.
-            is_completed: The new completion status of the step.
         """
         print(f"Controller: Step completion change for task '{task_id}', step '{step_id}', completed: {is_completed}")
         success = self.task_manager.update_step_completion(task_id, step_id, is_completed)
         if success:
-            self.tasks_data = self.task_manager.get_all_tasks() # Refresh local data
+            self.tasks_data = self.task_manager.get_all_tasks() 
             if self.task_list_view:
-                self.task_list_view.update_display(self.tasks_data) # Update view
+                self.task_list_view.update_display(self.tasks_data) 
         else:
             print(f"Controller: Failed to update step '{step_id}' completion in TaskManager.")
+
+    @Slot(str, bool)
+    def _handle_task_completion_change(self, task_id: str, is_completed: bool):
+        """
+        Slot to handle changes in a task's completion status (for tasks without steps).
+        Updates the TaskManager and then refreshes the TaskListView.
+        """
+        print(f"Controller: Task completion change for task '{task_id}', completed: {is_completed}")
+        success = self.task_manager.update_task_completion(task_id, is_completed)
+        if success:
+            self.tasks_data = self.task_manager.get_all_tasks()
+            if self.task_list_view:
+                self.task_list_view.update_display(self.tasks_data)
+        else:
+            print(f"Controller: Failed to update task '{task_id}' completion in TaskManager.")
 
 
     def mousePressEvent(self, event: QMouseEvent):

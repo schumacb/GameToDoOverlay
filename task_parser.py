@@ -12,8 +12,10 @@ class BaseTaskParser:
 
 class NltkTaskParser(BaseTaskParser):
     """
-    A task parser that uses NLTK to tokenize lines into sentences (steps)
-    for each task (line). The first sentence of a line becomes the task title.
+    A task parser that uses NLTK to tokenize lines into sentences.
+    The first sentence of a line becomes the task title.
+    If a line results in multiple sentences, all sentences become steps.
+    All tasks are initialized with completion status fields.
     """
     def parse(self, text_block: str) -> list:
         parsed_tasks = []
@@ -36,35 +38,38 @@ class NltkTaskParser(BaseTaskParser):
                 print(f"General error tokenizing task: '{original_line}'. Error: {e}")
                 sentences = [original_line]
 
-            if not sentences: # Should not happen if original_line is not empty
-                task_title_str = original_line # Fallback title
-                sentences = [original_line]
+            if not sentences: 
+                task_title_str = original_line 
             else:
-                task_title_str = sentences[0] # Use the first sentence as the title
+                task_title_str = sentences[0]
 
             current_main_task = {
                 "task_id": task_id_str,
-                "task_title": task_title_str, # First sentence is the title
-                "original_text_block": original_line, # Store the full original line if needed
-                "created_timestamp": current_time, 
-                "steps": []
+                "task_title": task_title_str,
+                "original_text_block": original_line,
+                "created_timestamp": current_time,
+                "steps": [],
+                "completed": False, # Initialize for all tasks
+                "completed_timestamp": None # Initialize for all tasks
             }
             
-            # All tokenized sentences become steps
-            for i, sentence_text in enumerate(sentences):
-                if not sentence_text.strip(): 
-                    continue
-                
-                step = {
-                    "step_id": str(uuid.uuid4()),
-                    "step_index": i,
-                    "text": sentence_text.strip(),
-                    "completed": False,
-                    "completed_timestamp": None,
-                }
-                current_main_task["steps"].append(step)
+            if len(sentences) > 1: # Multiple sentences, create steps
+                # The first sentence is the title, all sentences (including the first) become steps
+                for i, sentence_text in enumerate(sentences):
+                    if not sentence_text.strip(): 
+                        continue
+                    
+                    step = {
+                        "step_id": str(uuid.uuid4()),
+                        "step_index": i,
+                        "text": sentence_text.strip(),
+                        "completed": False,
+                        "completed_timestamp": None,
+                    }
+                    current_main_task["steps"].append(step)
             
-            if current_main_task["steps"]:
-                parsed_tasks.append(current_main_task)
+            # Add the task if it was derived from a non-empty line.
+            # The task_title_str will be non-empty if original_line was non-empty.
+            parsed_tasks.append(current_main_task)
                 
         return parsed_tasks
