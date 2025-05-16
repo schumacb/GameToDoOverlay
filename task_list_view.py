@@ -147,8 +147,8 @@ class TaskListView(QWidget):
             task_title_label.setWordWrap(True)
             task_title_label.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
 
-            task_header_layout.addWidget(main_task_checkbox, 0, Qt.AlignmentFlag.AlignTop)
-            task_header_layout.addWidget(task_title_label, 1)
+            task_header_layout.addWidget(main_task_checkbox, 0, Qt.AlignmentFlag.AlignVCenter)
+            task_header_layout.addWidget(task_title_label, 1, Qt.AlignmentFlag.AlignVCenter)
             task_group_frame_layout.addWidget(task_header_widget)
             
             main_task_checkbox.blockSignals(True) # Block signals before programmatic state changes
@@ -175,7 +175,7 @@ class TaskListView(QWidget):
 
                 for step_item in steps:
                     step_widget = QWidget(steps_container) 
-                    step_widget.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.MinimumExpanding)
+                    step_widget.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.MinimumExpanding)
                     step_row_layout = QHBoxLayout(step_widget) 
                     step_row_layout.setContentsMargins(0,0,0,0) 
                     step_row_layout.setSpacing(5)
@@ -193,8 +193,8 @@ class TaskListView(QWidget):
                     step_text_label.setWordWrap(True)
                     step_text_label.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
 
-                    step_row_layout.addWidget(step_checkbox, 0, Qt.AlignmentFlag.AlignTop)
-                    step_row_layout.addWidget(step_text_label, 1) 
+                    step_row_layout.addWidget(step_checkbox, 0, Qt.AlignmentFlag.AlignVCenter)
+                    step_row_layout.addWidget(step_text_label, 1, Qt.AlignmentFlag.AlignVCenter) 
                     steps_layout_for_group.addWidget(step_widget)
                 
                 task_group_frame_layout.addWidget(steps_container)
