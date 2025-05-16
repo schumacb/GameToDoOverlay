@@ -1,7 +1,11 @@
 import sys
+import uuid
+from datetime import datetime
+import nltk # For sentence tokenization
+
 from PySide6.QtWidgets import QApplication, QWidget, QVBoxLayout, QLabel, QSizePolicy
-from PySide6.QtCore import Qt, QPoint, QTimer, QRect
-from PySide6.QtGui import QFont, QScreen, QCursor
+from PySide6.QtCore import Qt, QPoint, QTimer, QRect, QEvent
+from PySide6.QtGui import QFont, QScreen, QCursor, QKeyEvent, QClipboard, QMouseEvent
 
 from config_manager import ConfigManager
 from shortcut_manager import ShortcutManager
@@ -20,7 +24,8 @@ class OverlayWindow(QWidget):
     """
     Main application window for the game checklist overlay.
     This window is frameless, always on top (configurable), and semi-transparent.
-    It supports dragging, resizing, and visibility control via global shortcuts.
+    It supports dragging, resizing, and visibility control via global shortcuts,
+    and task input via Ctrl+V when focused.
     """
     def __init__(self, config_manager: ConfigManager, shortcut_manager: ShortcutManager):
         """
@@ -33,47 +38,44 @@ class OverlayWindow(QWidget):
         super().__init__()
         self.config_manager = config_manager
         self.shortcut_manager = shortcut_manager
-        self._exiting_flag = False # Flag to prevent re-entrant exit logic
+        self._exiting_flag = False
 
-        # State variables for dragging and resizing
-        self._drag_offset = QPoint() # Offset from mouse press to window top-left for smooth dragging
+        self._drag_offset = QPoint()
         self._is_dragging = False
         self._is_resizing = False
-        self._current_resize_edge = None # Stores which edge/corner is being resized
-        self._resize_start_geometry = QRect() # Window geometry at the start of a resize operation
-        self._resize_start_mouse_pos = QPoint() # Global mouse position at the start of a resize
+        self._current_resize_edge = None
+        self._resize_start_geometry = QRect()
+        self._resize_start_mouse_pos = QPoint()
 
         self.min_width = int(self.config_manager.get("window.min_width", 100))
         self.min_height = int(self.config_manager.get("window.min_height", 50))
         
-        self._peek_timer = QTimer(self) # Timer for the "peek" visibility feature
+        self._peek_timer = QTimer(self)
         self._peek_timer.setSingleShot(True)
         self._peek_timer.timeout.connect(self._hide_after_peek_action)
+
+        self.tasks_data = [] # This will be a list of main task dictionaries, each containing steps
 
         self._setup_ui()
         self._apply_initial_window_settings()
         self._connect_shortcuts()
 
-        # Enable mouse tracking on the window and key child widgets to receive mouseMoveEvents
-        # even when no mouse buttons are pressed. This is crucial for changing the cursor
-        # shape when hovering over resize edges.
         self.setMouseTracking(True)
         if self.main_content_widget: self.main_content_widget.setMouseTracking(True)
         if self.main_label: self.main_label.setMouseTracking(True)
+        
+        self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
 
 
     def _setup_ui(self):
         """
         Sets up the main UI elements, window flags, and basic appearance of the overlay.
         """
-        # Qt.WindowDoesNotAcceptFocus is important for an overlay so it doesn't steal focus
-        # from the game when it appears, unless explicitly interacted with (drag/resize).
-        flags = Qt.FramelessWindowHint | Qt.WindowDoesNotAcceptFocus
+        flags = Qt.FramelessWindowHint
         if self.config_manager.get("window.always_on_top"):
             flags |= Qt.WindowStaysOnTopHint
         self.setWindowFlags(flags)
 
-        # Enable WA_TranslucentBackground for custom painting and per-pixel alpha.
         self.setAttribute(Qt.WA_TranslucentBackground, True)
         
         opacity = float(self.config_manager.get("appearance.transparency", 0.85))
@@ -82,9 +84,6 @@ class OverlayWindow(QWidget):
         self.main_layout = QVBoxLayout(self)
         self.main_layout.setContentsMargins(0, 0, 0, 0)
 
-        # A QWidget to act as the main content area.
-        # This allows for a background color that's distinct from the window's own transparency
-        # and provides a container for other UI elements.
         self.main_content_widget = QWidget(self)
         content_bg_color = self.config_manager.get("appearance.content_background_color", "#3C3C3C")
         text_color = self.config_manager.get("appearance.text_color", "#FFFFFF")
@@ -95,19 +94,22 @@ class OverlayWindow(QWidget):
             QWidget {{
                 background-color: {content_bg_color};
                 color: {text_color};
-                border: none; /* Ensure no default border that might interfere. */
+                border: none;
             }}
         """)
         
         content_layout = QVBoxLayout(self.main_content_widget)
-        content_layout.setContentsMargins(5,5,5,5) # Internal padding for content within this widget.
+        content_layout.setContentsMargins(5,5,5,5)
 
         exit_shortcut_str = self.config_manager.get("shortcuts.exit_application", "Ctrl+Shift+Q")
-        self.main_label = QLabel(f"Overlay Initializing...\n({exit_shortcut_str} to Exit)", self.main_content_widget)
+        self.main_label = QLabel(
+            f"Overlay Initialized. Focus and Ctrl+V to paste tasks.\n({exit_shortcut_str} to Exit)", 
+            self.main_content_widget
+        )
         self.main_label.setFont(QFont(font_family, font_size))
         self.main_label.setAlignment(Qt.AlignCenter)
         self.main_label.setWordWrap(True)
-        self.main_label.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding) # Allow label to expand
+        self.main_label.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
 
         content_layout.addWidget(self.main_label)
         self.main_layout.addWidget(self.main_content_widget)
@@ -120,9 +122,9 @@ class OverlayWindow(QWidget):
         configuration settings (remembered values or defaults).
         """
         primary_screen = QApplication.primaryScreen()
-        screen_width, screen_height = 1920, 1080 # Fallback if screen info is unavailable
+        screen_width, screen_height = 1920, 1080 
         if primary_screen:
-            screen_geometry = primary_screen.availableGeometry() # Use availableGeometry to account for OS taskbars
+            screen_geometry = primary_screen.availableGeometry()
             screen_width, screen_height = screen_geometry.width(), screen_geometry.height()
         else:
             print("Warning: Could not get primary screen for initial geometry calculation.")
@@ -152,8 +154,6 @@ class OverlayWindow(QWidget):
             y_offset = int(self.config_manager.get("window.initial_y_offset_from_top", 10))
             x = screen_width - width - x_offset
             y = y_offset
-            # If "remember_position" is true but no last position was stored,
-            # save the newly calculated initial position.
             if self.config_manager.get("window.remember_position"):
                 self.config_manager.set("window.last_x", x)
                 self.config_manager.set("window.last_y", y)
@@ -173,11 +173,97 @@ class OverlayWindow(QWidget):
         self.shortcut_manager.peek_visibility_requested.connect(self.peek_visibility)
         self.shortcut_manager.exit_application_requested.connect(self.exit_application)
 
-    def mousePressEvent(self, event: 'QMouseEvent'):
+    def keyPressEvent(self, event: QKeyEvent):
+        """
+        Handles key press events for the window, specifically for Ctrl+V paste.
+        """
+        if event.modifiers() == Qt.ControlModifier and event.key() == Qt.Key_V:
+            clipboard = QApplication.clipboard()
+            pasted_text = clipboard.text(QClipboard.Mode.Clipboard)
+            if pasted_text:
+                self._parse_and_load_tasks(pasted_text)
+                event.accept()
+                return 
+        super().keyPressEvent(event)
+
+    def _parse_and_load_tasks(self, text_block: str):
+        """
+        Parses a block of text into main tasks and their steps.
+        Each line from the pasted text becomes a main task.
+        Sentences within each line become individual steps for that task.
+        The self.tasks_data attribute will store a list of main task dictionaries.
+        """
+        print("Parsing tasks...")
+        self.tasks_data = [] # List of main task dictionaries
+        lines = text_block.strip().splitlines()
+        current_time = datetime.now()
+        total_steps_count = 0
+
+        for line_content in lines:
+            if not line_content.strip(): 
+                continue
+            
+            task_id_str = str(uuid.uuid4()) # Unique ID for the main task
+            task_title_str = line_content.strip() # The original pasted line is the task title
+            
+            current_main_task = {
+                "task_id": task_id_str,
+                "task_title": task_title_str,
+                "created_timestamp": current_time, 
+                "steps": [] # List of step dictionaries for this main task
+            }
+            
+            try:
+                # Tokenize the task_title (which is the full line) into sentences (steps)
+                sentences = nltk.sent_tokenize(task_title_str) 
+            except LookupError as e:
+                print(f"NLTK LookupError tokenizing task: '{task_title_str}'. Error: {e}")
+                print("This might indicate a missing NLTK sub-resource.")
+                print("Ensure NLTK 'punkt' data and its components are downloaded.")
+                sentences = [task_title_str] # Fallback: treat the whole line as a single step
+            except Exception as e: 
+                print(f"General error tokenizing task: '{task_title_str}'. Error: {e}")
+                sentences = [task_title_str]
+
+            if not sentences: 
+                sentences = [task_title_str] 
+
+            for i, sentence_text in enumerate(sentences):
+                if not sentence_text.strip(): 
+                    continue
+                
+                step = {
+                    "step_id": str(uuid.uuid4()), # Unique ID for the step
+                    "step_index": i, # Order of the step within the task
+                    "text": sentence_text.strip(),
+                    "completed": False,
+                    "completed_timestamp": None,
+                }
+                current_main_task["steps"].append(step)
+                total_steps_count += 1
+            
+            if current_main_task["steps"]: # Only add the main task if it has steps
+                self.tasks_data.append(current_main_task)
+        
+        print(f"Loaded {len(self.tasks_data)} main tasks with a total of {total_steps_count} steps.")
+        for task_item in self.tasks_data: 
+            print(f"  Task: '{task_item['task_title'][:50]}...' ({len(task_item['steps'])} steps)")
+        
+        if self.tasks_data:
+            self.main_label.setText(f"{len(self.tasks_data)} tasks loaded. Display coming soon!\n(Ctrl+V to paste new tasks)")
+        else:
+            self.main_label.setText("Pasted text resulted in no tasks.\n(Ctrl+V to paste tasks)")
+
+
+    def mousePressEvent(self, event: QMouseEvent):
         """
         Handles mouse button press events.
         Initiates dragging or resizing based on the mouse position.
+        Also explicitly sets focus to the window on click, aiding paste functionality.
         """
+        if not self.hasFocus():
+            self.setFocus(Qt.FocusReason.MouseFocusReason)
+
         if event.button() == Qt.LeftButton:
             self._current_resize_edge = self._get_resize_edge(event.position().toPoint())
             if self._current_resize_edge:
@@ -190,11 +276,10 @@ class OverlayWindow(QWidget):
             else: 
                 self._is_dragging = True
                 self._is_resizing = False
-                # Calculate offset of mouse press from window's top-left corner for smooth drag.
                 self._drag_offset = event.globalPosition().toPoint() - self.frameGeometry().topLeft()
             event.accept()
 
-    def mouseMoveEvent(self, event: 'QMouseEvent'):
+    def mouseMoveEvent(self, event: QMouseEvent):
         """
         Handles mouse move events.
         Performs dragging or resizing if active. Otherwise, updates the cursor shape
@@ -206,13 +291,13 @@ class OverlayWindow(QWidget):
 
             if "left" in self._current_resize_edge:
                 new_width = max(self.min_width, new_geom.width() - delta.x())
-                new_geom.setLeft(new_geom.right() - new_width) # Adjust left edge, keep right fixed.
+                new_geom.setLeft(new_geom.right() - new_width)
             elif "right" in self._current_resize_edge:
                 new_geom.setWidth(max(self.min_width, new_geom.width() + delta.x()))
             
             if "top" in self._current_resize_edge:
                 new_height = max(self.min_height, new_geom.height() - delta.y())
-                new_geom.setTop(new_geom.bottom() - new_height) # Adjust top edge, keep bottom fixed.
+                new_geom.setTop(new_geom.bottom() - new_height)
             elif "bottom" in self._current_resize_edge:
                 new_geom.setHeight(max(self.min_height, new_geom.height() + delta.y()))
             
@@ -227,7 +312,7 @@ class OverlayWindow(QWidget):
             self.setCursor(CURSOR_MAP.get(cursor_type, Qt.ArrowCursor))
             event.accept() 
 
-    def mouseReleaseEvent(self, event: 'QMouseEvent'):
+    def mouseReleaseEvent(self, event: QMouseEvent):
         """
         Handles mouse button release events.
         Finalizes dragging or resizing operations and saves new geometry if configured.
@@ -263,12 +348,6 @@ class OverlayWindow(QWidget):
         """
         Determines which resize edge, if any, the given mouse position (relative to widget)
         is currently over.
-
-        Args:
-            pos: The mouse position (QPoint) relative to the widget.
-
-        Returns:
-            A string identifier for the edge (e.g., "left", "top_right") or None if not on an edge.
         """
         on_left = pos.x() >= 0 and pos.x() < RESIZE_MARGIN
         on_right = pos.x() <= self.width() and pos.x() > self.width() - RESIZE_MARGIN
@@ -291,12 +370,6 @@ class OverlayWindow(QWidget):
         """
         Maps a resize edge string identifier to a cursor type string identifier
         used in CURSOR_MAP.
-
-        Args:
-            edge_str: The string identifier for the edge (e.g., "left", "top_right").
-
-        Returns:
-            A string key for the CURSOR_MAP (e.g., "size_h", "size_tl_br").
         """
         if not edge_str: return "arrow"
         if edge_str in ["left", "right"]: return "size_h"
@@ -314,8 +387,6 @@ class OverlayWindow(QWidget):
     def toggle_visibility(self):
         """
         Toggles the visibility of the overlay window.
-        If the window is visible, it's hidden. If hidden, it's shown and brought to the top.
-        Cancels any active "peek" timer.
         """
         if self._exiting_flag: return
         if self.isVisible():
@@ -327,15 +398,14 @@ class OverlayWindow(QWidget):
             self.show()
             if self.config_manager.get("window.always_on_top"):
                 self.setWindowFlag(Qt.WindowStaysOnTopHint, True)
-                self.show() # Re-show to apply window flag changes if it was hidden.
-            self.activateWindow() # Try to bring to front (may not always steal focus from full-screen game).
-            self.raise_() # Raises this widget to the top of the parent widget's stack.
+                self.show() 
+            self.activateWindow() 
+            self.raise_() 
             print("Overlay shown.")
 
     def peek_visibility(self):
         """
         Shows the overlay window temporarily for a configured duration ("peek").
-        If already visible, the peek timer is restarted.
         """
         if self._exiting_flag: return
         duration_ms = int(self.config_manager.get("shortcuts.peek_duration_seconds", 3) * 1000)
@@ -356,7 +426,6 @@ class OverlayWindow(QWidget):
     def _hide_after_peek_action(self):
         """
         Slot connected to the _peek_timer's timeout signal.
-        Hides the window if it's still visible and the application isn't exiting.
         """
         if self.isVisible() and not self._exiting_flag:
             self.hide()
@@ -365,21 +434,18 @@ class OverlayWindow(QWidget):
     def exit_application(self):
         """
         Initiates the application shutdown sequence.
-        Sets an exiting flag and calls self.close() to trigger the closeEvent.
         """
         if self._exiting_flag: return
         self._exiting_flag = True
         print("Exit application initiated by shortcut/signal.")
-        self.close() # This will trigger the closeEvent where actual cleanup occurs.
+        self.close() 
 
     def closeEvent(self, event: 'QCloseEvent'):
         """
-        Handles the window's close event (e.g., from self.close() or OS).
-        Performs necessary cleanup like stopping the shortcut listener and timers
-        before allowing the application to quit.
+        Handles the window's close event.
         """
         print("OverlayWindow.closeEvent() called.")
-        if not self._exiting_flag: # Ensure flag is set if closeEvent is triggered externally
+        if not self._exiting_flag: 
             self._exiting_flag = True 
 
         print("App Info: Stopping shortcut listener...")
@@ -392,24 +458,32 @@ class OverlayWindow(QWidget):
         
         print("App Info: Accepting close event. Application will quit.")
         event.accept()
-        QApplication.instance().quit() # Tell the Qt application event loop to terminate.
+        QApplication.instance().quit()
 
 if __name__ == "__main__":
+    nltk_data_verified = True
+    nltk_punkt_downloaded = False
+
     try:
-        import nltk
-        nltk.data.find('tokenizers/punkt') # Check if 'punkt' tokenizer models are available
+        nltk.data.find('tokenizers/punkt')
         print("NLTK 'punkt' tokenizer found.")
+        nltk_punkt_downloaded = True
     except LookupError:
         print("NLTK 'punkt' tokenizer not found. Attempting to download...")
         try:
             nltk.download('punkt', quiet=True)
             nltk.data.find('tokenizers/punkt') 
             print("'punkt' tokenizer downloaded and verified.")
+            nltk_punkt_downloaded = True
         except Exception as e:
-            print(f"Error downloading or verifying 'punkt' tokenizer: {e}. Please install manually or check network.")
-            sys.exit(1)
+            print(f"Error downloading or verifying 'punkt' tokenizer: {e}.")
+            nltk_data_verified = False 
     except ImportError:
         print("NLTK library not found. Please install it: pip install nltk")
+        nltk_data_verified = False 
+    
+    if not nltk_data_verified: 
+        print("Critical NLTK setup failed. Please ensure NLTK is installed and 'punkt' data can be downloaded.")
         sys.exit(1)
 
     app = QApplication(sys.argv)
@@ -425,8 +499,6 @@ if __name__ == "__main__":
     exit_code = app.exec()
     print(f"Application event loop finished. Exiting with code: {exit_code}")
     
-    # Perform final cleanup if necessary, though closeEvent should handle most.
-    # pynput listener (daemon thread) should allow exit once stop() is called.
     if shortcut_mgr: 
         shortcut_mgr.stop_listening() 
     
