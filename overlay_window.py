@@ -360,7 +360,10 @@ class OverlayWindow(QWidget):
     def paintEvent(self, event: 'QPaintEvent'):
         """Handles paint events for the window, drawing a custom faded border."""
         super().paintEvent(event)
-
+        clear_painter = QPainter(self)
+        clear_painter.setCompositionMode(QPainter.CompositionMode_Source)
+        clear_painter.fillRect(self.rect(), Qt.transparent)
+        clear_painter.end()
         if FADE_BORDER_WIDTH <= 0:
             return
 
