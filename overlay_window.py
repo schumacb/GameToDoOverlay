@@ -409,7 +409,7 @@ class OverlayWindow(QWidget):
                 elif py > content_area_bottom:
                     dy_to_content_edge = py - content_area_bottom - 1
 
-                margin_depth = max(dx_to_content_edge, dy_to_content_edge)
+                margin_depth = math.hypot(dx_to_content_edge, dy_to_content_edge)
 
                 if margin_depth < 0 or margin_depth >= FADE_BORDER_WIDTH:
                     continue
