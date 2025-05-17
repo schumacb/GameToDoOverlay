@@ -12,9 +12,10 @@ DEFAULT_CONFIG = {
         "background_color": "#1A1A1A",
         "content_background_color": "#1F1F1F",
         "text_color": "#E0E0E0",
-        "font_family": "Arial", 
+        "font_family": "Arial",
         "font_size": 10,
-        "transparency": 0.70
+        "transparency": 0.70,
+        "fade_type": "quadratic" # Options: "linear", "quadratic", "logarithmic"
     },
     "window": {
         "initial_width": 250,
@@ -38,8 +39,8 @@ DEFAULT_CONFIG = {
         "exit_application": "ctrl+shift+Q"
     },
     "behavior": {
-        "auto_shrink_to_fit_tasks": True, 
-        "min_height_one_task": 50 
+        "auto_shrink_to_fit_tasks": True,
+        "min_height_one_task": 50
     }
 }
 
@@ -53,12 +54,9 @@ class ConfigManager:
         """
         Initializes the ConfigManager, sets up the configuration path, and loads the configuration.
         """
+        # Initialize self.config as the very first step to ensure it exists.
+        self.config = {}
         self.config_path = os.path.join(user_config_dir(APP_NAME, APP_AUTHOR), "config.json")
-        # self.config is initialized here and populated by _load_config.
-        # If _load_config fails before self.config is properly assigned, 
-        # it might be an issue if other methods are called.
-        # However, _load_config now handles its own errors more gracefully regarding self.config state.
-        self.config = {} 
         self._load_config()
 
     def _ensure_config_dir_exists(self):
@@ -106,17 +104,17 @@ class ConfigManager:
         The potentially updated/repaired configuration is saved back.
         """
         self._ensure_config_dir_exists()
-        
-        # Initialize self.config with a deep copy of defaults.
+
+        # Initialize current_config_state with a deep copy of defaults.
         # This ensures that even if loading fails or the file is partial,
-        # self.config starts from a known good state.
+        # current_config_state starts from a known good state.
         current_config_state = copy.deepcopy(DEFAULT_CONFIG)
 
         if os.path.exists(self.config_path) and os.path.getsize(self.config_path) > 0:
             try:
                 with open(self.config_path, 'r') as f:
                     loaded_config_values = json.load(f)
-                
+
                 # Update the default state with values from the loaded config file
                 if isinstance(loaded_config_values, dict):
                     self._recursive_update(current_config_state, loaded_config_values)
@@ -140,20 +138,22 @@ class ConfigManager:
         # Ensure all default keys are present, even if loaded_config was from an older version
         # or if loaded_config was partial.
         self._ensure_default_keys(current_config_state, DEFAULT_CONFIG)
-        
+
+        # Assign the fully prepared state to self.config
         self.config = current_config_state
 
         # Initialize last known width/height from initial if not set and remember_size is true
-        if self.config.get("window", {}).get("remember_size"): # defensive get
+        # Now self.config is guaranteed to be a dictionary.
+        if self.config.get("window", {}).get("remember_size"):
             if self.config.get("window", {}).get("last_width") is None:
-                initial_width = DEFAULT_CONFIG.get("window", {}).get("initial_width", 250) # get from default
-                if "window" not in self.config: self.config["window"] = {}
+                initial_width = DEFAULT_CONFIG.get("window", {}).get("initial_width", 250)
+                if "window" not in self.config: self.config["window"] = {} # Should not be needed if _ensure_default_keys worked
                 self.config["window"]["last_width"] = initial_width
             if self.config.get("window", {}).get("last_height") is None:
-                initial_height = DEFAULT_CONFIG.get("window", {}).get("initial_height", 200) # get from default
-                if "window" not in self.config: self.config["window"] = {}
+                initial_height = DEFAULT_CONFIG.get("window", {}).get("initial_height", 200)
+                if "window" not in self.config: self.config["window"] = {} # Should not be needed
                 self.config["window"]["last_height"] = initial_height
-        
+
         # Always save the configuration after loading.
         # This ensures that if the file was missing, corrupted, or from an older version,
         # it's updated to the current complete and valid format.
@@ -173,6 +173,8 @@ class ConfigManager:
             The configuration value or a default.
         """
         keys = key_path.split('.')
+        # self.config should exist due to __init__ and _load_config assignments.
+        # If the AttributeError persists, the issue is more fundamental than simple initialization order.
         value = self.config
         try:
             for key in keys:
@@ -198,10 +200,10 @@ class ConfigManager:
             value: The value to set for the key.
         """
         keys = key_path.split('.')
-        current_level = self.config
+        current_level = self.config # self.config should be a dictionary here.
         for i, key in enumerate(keys[:-1]):
             if key not in current_level or not isinstance(current_level[key], dict):
-                current_level[key] = {} 
+                current_level[key] = {}
             current_level = current_level[key]
         current_level[keys[-1]] = value
         self._save_config()
@@ -214,7 +216,7 @@ class ConfigManager:
         self._ensure_config_dir_exists()
         try:
             with open(self.config_path, 'w') as f:
-                json.dump(self.config, f, indent=4)
+                json.dump(self.config, f, indent=4) # self.config should be a dictionary here
         except IOError as e:
             print(f"Error: Could not save config to {self.config_path}: {e}")
         except TypeError as e:
@@ -230,4 +232,4 @@ class ConfigManager:
         Returns:
             A dictionary representing the current configuration.
         """
-        return copy.deepcopy(self.config)
+        return copy.deepcopy(self.config) # self.config should be a dictionary here

@@ -1,8 +1,9 @@
+import math
 from PySide6.QtWidgets import QApplication, QWidget, QVBoxLayout, QLabel, QSizePolicy
 from PySide6.QtCore import Qt, QPoint, QTimer, QRect, Slot
 from PySide6.QtGui import (
     QFont, QScreen, QCursor, QKeyEvent, QClipboard, QMouseEvent,
-    QPainter, QColor, QImage  # Added QPainter, QColor, QImage
+    QPainter, QColor, QImage
 )
 
 from typing import TYPE_CHECKING
@@ -28,13 +29,13 @@ CURSOR_MAP = {
 }
 
 # Configuration for the faded border effect
-FADE_BORDER_WIDTH = 15  # Width of the faded border in pixels
-NOISE_SCALE = 0.01      # Adjusts the "zoom" level of the noise pattern
-NOISE_OCTAVES = 8       # Number of noise layers for complexity
-NOISE_PERSISTENCE = 0.8 # Amplitude factor for each octave
-NOISE_LACUNARITY = 2.0  # Frequency factor for each octave
-NOISE_BASE_SEED = 42    # Seed for Perlin noise generator for consistent patterns
-NOISE_MODULATION_STRENGTH = 1 # How much noise affects alpha (0.0 to 1.0)
+FADE_BORDER_WIDTH = 20
+NOISE_SCALE = 0.06
+NOISE_OCTAVES = 4
+NOISE_PERSISTENCE = 0.6
+NOISE_LACUNARITY = 2.0
+NOISE_BASE_SEED = 42
+NOISE_MODULATION_STRENGTH = 1.0
 
 
 class OverlayWindow(QWidget):
@@ -45,7 +46,7 @@ class OverlayWindow(QWidget):
     shortcut management, task parsing, task data persistence (TaskManager),
     and the task display component (TaskListView).
     Handles completion for both tasks with steps and directly checkable tasks.
-    Features a custom-painted faded border with optional noise effect.
+    Features a custom-painted faded border with optional noise effect and selectable fade types.
     """
     def __init__(self,
                  config_manager: 'ConfigManager',
@@ -75,8 +76,10 @@ class OverlayWindow(QWidget):
         self._current_resize_edge = None
         self._resize_start_geometry = QRect()
         self._resize_start_mouse_pos = QPoint()
-        
+
         self.content_bg_color_str = "" # Will be set in _setup_ui
+        self.fade_type = self.config_manager.get("appearance.fade_type", "quadratic")
+
 
         self.min_width = int(self.config_manager.get("window.min_width", 100))
         self.min_height = int(self.config_manager.get("window.min_height", 50))
@@ -356,75 +359,86 @@ class OverlayWindow(QWidget):
 
     def paintEvent(self, event: 'QPaintEvent'):
         """Handles paint events for the window, drawing a custom faded border."""
-        # The super().paintEvent might fill the background based on WA_TranslucentBackground.
-        # We are painting over it / replacing it for the border area.
         super().paintEvent(event)
 
         if FADE_BORDER_WIDTH <= 0:
             return
 
-        # Create an image to draw the border onto; this is often faster than direct QPainter calls in Python loops.
         image_to_draw = QImage(self.size(), QImage.Format.Format_ARGB32_Premultiplied)
-        image_to_draw.fill(Qt.GlobalColor.transparent) # Start with a fully transparent image
-
-        # Painter for the off-screen image
+        image_to_draw.fill(Qt.GlobalColor.transparent)
         image_painter = QPainter(image_to_draw)
 
         win_width = self.width()
         win_height = self.height()
 
         try:
-            # Use the stored content background color string
             base_border_color = QColor(self.content_bg_color_str)
-            if not base_border_color.isValid(): # Fallback if the color string was bad
+            if not base_border_color.isValid():
                 base_border_color = QColor(self.config_manager.get("appearance.content_background_color", "#1F1F1F"))
-        except Exception: # Ultimate fallback
+        except Exception:
             base_border_color = QColor(Qt.GlobalColor.darkGray)
 
         content_r, content_g, content_b = base_border_color.red(), base_border_color.green(), base_border_color.blue()
 
-        # Define the boundaries of the actual content area (inside the border)
         content_area_left = FADE_BORDER_WIDTH
         content_area_top = FADE_BORDER_WIDTH
-        # -1 because right/bottom are inclusive pixel indices if used in comparisons like px <= content_area_right
         content_area_right = win_width - FADE_BORDER_WIDTH - 1
         content_area_bottom = win_height - FADE_BORDER_WIDTH - 1
 
 
         for py in range(win_height):
             for px in range(win_width):
-                # Check if current pixel (px, py) is inside the main content area
                 is_in_content_area = (content_area_left <= px <= content_area_right and
                                       content_area_top <= py <= content_area_bottom)
 
                 if is_in_content_area:
-                    continue # Skip pixels within the content area; they are drawn by main_content_widget
+                    continue
 
-                # Pixel (px, py) is in the border margin. Calculate its properties.
-                # margin_depth: How far this pixel is from the content edge, moving outwards.
-                # 0 = adjacent to content, FADE_BORDER_WIDTH-1 = at window edge.
                 dx_to_content_edge = 0
-                if px < content_area_left:  # Pixel is in left margin
+                if px < content_area_left:
                     dx_to_content_edge = content_area_left - px - 1
-                elif px > content_area_right:  # Pixel is in right margin
+                elif px > content_area_right:
                     dx_to_content_edge = px - content_area_right - 1
 
                 dy_to_content_edge = 0
-                if py < content_area_top:  # Pixel is in top margin
+                if py < content_area_top:
                     dy_to_content_edge = content_area_top - py - 1
-                elif py > content_area_bottom:  # Pixel is in bottom margin
+                elif py > content_area_bottom:
                     dy_to_content_edge = py - content_area_bottom - 1
-                
-                # The "depth" into the margin, from the content edge outwards
+
                 margin_depth = max(dx_to_content_edge, dy_to_content_edge)
 
-                if margin_depth < 0 or margin_depth >= FADE_BORDER_WIDTH: # Should not happen with correct logic
+                if margin_depth < 0 or margin_depth >= FADE_BORDER_WIDTH:
                     continue
 
-                # Calculate base alpha: fades from opaque (near content) to transparent (at window edge)
-                # intensity_factor: 1.0 (opaque) at content edge, 0.0 (transparent) at window edge.
-                intensity_factor = 1.0 - (float(margin_depth) / FADE_BORDER_WIDTH)
+                intensity_factor = 0.0
+                if FADE_BORDER_WIDTH <= 1:
+                    normalized_progress = 1.0 if margin_depth == 0 else 0.0 # 0 near content, 1 at edge
+                else:
+                    # normalized_progress (x): 0 (pixel adjacent to content) to 1 (pixel at window edge)
+                    normalized_progress = float(margin_depth) / (FADE_BORDER_WIDTH - 1.0)
+
+                if self.fade_type == "linear":
+                    intensity_factor = 1.0 - normalized_progress
+                elif self.fade_type == "quadratic":
+                    # (1-x)^2, opacity fades faster near content then levels off
+                    intensity_factor = (1.0 - normalized_progress)**2
+                elif self.fade_type == "logarithmic":
+                    # y_param goes from 1 (near content) to 0 (at window edge)
+                    y_param = 1.0 - normalized_progress
+                    if y_param < 1e-9: # Avoid log issues with y_param = 0
+                        intensity_factor = 0.0
+                    else:
+                        # Using natural log: log(y * (e-1) + 1). This gives a curve that is 1 at y=1 and 0 at y=0.
+                        # The (e-1) term scales y such that when y=1, expression inside log is e, when y=0, expression is 1.
+                        intensity_factor = math.log(y_param * (math.e - 1.0) + 1.0)
+                else: # Fallback to linear
+                    intensity_factor = 1.0 - normalized_progress
+                
+                # Ensure intensity_factor is clamped between 0 and 1
+                intensity_factor = max(0.0, min(1.0, intensity_factor))
                 current_alpha = int(intensity_factor * 255)
+
 
                 if pnoise2 and NOISE_MODULATION_STRENGTH > 0:
                     noise_value = pnoise2(
@@ -435,19 +449,15 @@ class OverlayWindow(QWidget):
                         lacunarity=NOISE_LACUNARITY,
                         base=NOISE_BASE_SEED
                     )
-                    # Map noise_value (approx -0.7 to 0.7 for 2 octaves) to a modulation factor
-                    # e.g., if noise_value is 0.5, modulation is 1.0 + 0.5 * strength
                     modulation = 1.0 + (noise_value * NOISE_MODULATION_STRENGTH)
                     current_alpha = int(current_alpha * modulation)
 
-                current_alpha = max(0, min(255, current_alpha)) # Clamp alpha
+                current_alpha = max(0, min(255, current_alpha))
 
-                # Set pixel on the off-screen image
                 image_to_draw.setPixelColor(px, py, QColor(content_r, content_g, content_b, current_alpha))
 
-        image_painter.end() # Finish painting on the image
+        image_painter.end()
 
-        # Draw the composed image (with the faded border) onto the widget itself
         main_window_painter = QPainter(self)
         main_window_painter.drawImage(0, 0, image_to_draw)
         main_window_painter.end()
@@ -506,4 +516,4 @@ class OverlayWindow(QWidget):
     def resizeEvent(self, event: 'QResizeEvent'):
         """Handles window resize events."""
         super().resizeEvent(event)
-        self.update() # Trigger a repaint to redraw the border correctly for the new size
+        self.update()
