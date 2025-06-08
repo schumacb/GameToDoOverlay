@@ -3,7 +3,7 @@ from PySide6.QtWidgets import QApplication, QWidget, QVBoxLayout, QLabel, QSizeP
 from PySide6.QtCore import Qt, QPoint, QTimer, QRect, Slot
 from PySide6.QtGui import (
     QFont, QScreen, QCursor, QKeyEvent, QClipboard, QMouseEvent,
-    QPainter, QColor, QImage, QGuiApplication
+    QPainter, QColor, QImage, QGuiApplication, QShowEvent
 )
 
 from typing import TYPE_CHECKING
@@ -22,7 +22,7 @@ except ImportError:
     print("Warning: 'noise' library not found. Faded border will not have noise effect. Consider installing it: pip install noise")
     pnoise2 = None
 
-RESIZE_MARGIN = 8
+RESIZE_MARGIN = 20
 CURSOR_MAP = {
     "arrow": Qt.ArrowCursor, "size_h": Qt.SizeHorCursor, "size_v": Qt.SizeVerCursor,
     "size_tl_br": Qt.SizeFDiagCursor, "size_tr_bl": Qt.SizeBDiagCursor,
@@ -69,6 +69,7 @@ class OverlayWindow(QWidget):
         self.task_manager = task_manager
         self.task_parser = task_parser
         self._exiting_flag = False
+        self._is_first_show = True
 
         self._drag_offset = QPoint()
         self._is_dragging = False
@@ -199,6 +200,11 @@ class OverlayWindow(QWidget):
              if self.config_manager.get("window.last_width") is None: self.config_manager.set("window.last_width", width)
              if self.config_manager.get("window.last_height") is None: self.config_manager.set("window.last_height", height)
 
+        self._initial_x = x
+        self._initial_y = y
+        self._initial_width = width
+        self._initial_height = height
+        print(f"Stored initial geometry: x={self._initial_x}, y={self._initial_y}, w={self._initial_width}, h={self._initial_height}") # Logging the stored values
         self.setGeometry(x, y, width, height)
         print(f"Initial geometry set to: x={x}, y={y}, width={width}, height={height}")
 
@@ -277,11 +283,31 @@ class OverlayWindow(QWidget):
         if event.button() == Qt.LeftButton:
             self._current_resize_edge = self._get_resize_edge(event.position().toPoint())
             if self._current_resize_edge:
-                self._is_resizing = True; self._is_dragging = False
-                self._resize_start_geometry = self.geometry()
-                self._resize_start_mouse_pos = event.globalPosition().toPoint()
-                cursor_type = self._current_resize_edge_to_cursor_type(self._current_resize_edge)
-                self.setCursor(CURSOR_MAP.get(cursor_type, Qt.ArrowCursor))
+                platform_name = QGuiApplication.platformName()
+                if platform_name == "wayland" and self.windowHandle():
+                    edge_map = {
+                        "left": Qt.LeftEdge, "right": Qt.RightEdge, "top": Qt.TopEdge, "bottom": Qt.BottomEdge,
+                        "top_left": Qt.TopEdge | Qt.LeftEdge, "top_right": Qt.TopEdge | Qt.RightEdge,
+                        "bottom_left": Qt.BottomEdge | Qt.LeftEdge, "bottom_right": Qt.BottomEdge | Qt.RightEdge,
+                    }
+                    qt_edges = edge_map.get(self._current_resize_edge)
+                    if qt_edges:
+                        print(f"Attempting system resize for Wayland on edge: {self._current_resize_edge} ({qt_edges})")
+                        self.windowHandle().startSystemResize(qt_edges)
+                        self._is_resizing = False # System handles resizing
+                    else: # Fallback if edge string is somehow not in map (should not happen)
+                        self._is_resizing = True; self._is_dragging = False
+                        self._resize_start_geometry = self.geometry()
+                        self._resize_start_mouse_pos = event.globalPosition().toPoint()
+                        cursor_type = self._current_resize_edge_to_cursor_type(self._current_resize_edge)
+                        self.setCursor(CURSOR_MAP.get(cursor_type, Qt.ArrowCursor))
+                else:
+                    # Original logic for non-Wayland or if windowHandle is None
+                    self._is_resizing = True; self._is_dragging = False
+                    self._resize_start_geometry = self.geometry()
+                    self._resize_start_mouse_pos = event.globalPosition().toPoint()
+                    cursor_type = self._current_resize_edge_to_cursor_type(self._current_resize_edge)
+                    self.setCursor(CURSOR_MAP.get(cursor_type, Qt.ArrowCursor))
             else:
                 # Not resizing, so could be dragging
                 platform_name = QGuiApplication.platformName()
@@ -343,6 +369,7 @@ class OverlayWindow(QWidget):
                 if self.config_manager.get("window.remember_position"):
                     self.config_manager.set("window.last_x", self.x())
                     self.config_manager.set("window.last_y", self.y())
+                    print(f"Drag completed (non-Wayland manual drag): Position saved x={self.x()}, y={self.y()}")
             self._current_resize_edge = None
             if action_taken: # Only reset cursor if we were dragging or resizing
                 current_hover_edge = self._get_resize_edge(event.position().toPoint())
@@ -528,6 +555,7 @@ class OverlayWindow(QWidget):
 
     def closeEvent(self, event: 'QCloseEvent'):
         """Handles window close event for cleanup before application quit."""
+        print(f"Exiting: Current window position x={self.x()}, y={self.y()}")
         print("OverlayWindow.closeEvent() called.")
         if not self._exiting_flag: self._exiting_flag = True
         print("App Info: Stopping shortcut listener...")
@@ -542,3 +570,23 @@ class OverlayWindow(QWidget):
         """Handles window resize events."""
         super().resizeEvent(event)
         self.update()
+
+    def showEvent(self, event: 'QShowEvent'):
+        """Handles window show events, especially for Wayland initial geometry."""
+        super().showEvent(event)
+        print("showEvent called.")
+
+        platform_name = QGuiApplication.platformName()
+        if self._is_first_show and platform_name == "wayland":
+            print(f"showEvent: First show on Wayland. Current geometry: {self.geometry()}")
+            if hasattr(self, '_initial_x') and hasattr(self, '_initial_y') and \
+               hasattr(self, '_initial_width') and hasattr(self, '_initial_height'):
+                print(f"showEvent: Applying stored initial geometry: x={self._initial_x}, y={self._initial_y}, w={self._initial_width}, h={self._initial_height}")
+                self.setGeometry(self._initial_x, self._initial_y, self._initial_width, self._initial_height)
+                print(f"showEvent: Geometry after attempting to apply stored: {self.geometry()}")
+            else:
+                print("showEvent: Stored initial geometry attributes not found.")
+            self._is_first_show = False
+        elif self._is_first_show:
+            # Not Wayland, but still first show, so set flag to false
+            self._is_first_show = False
