@@ -59,5 +59,9 @@ GameToDoOverlay is a Python application designed to display a checklist or task 
 Once the setup is complete and the virtual environment is activated, you can run the application using:
 
 ```bash
-python -m task_list_overlay.__main__
+python -m task_list_overlay
 ```
+
+## License
+
+This project is licensed under the MIT License - see the LICENSE.md file for details.
