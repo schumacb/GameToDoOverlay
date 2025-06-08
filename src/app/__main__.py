@@ -3,11 +3,11 @@ import nltk
 
 from PySide6.QtWidgets import QApplication
 
-from config_manager import ConfigManager, APP_NAME, APP_AUTHOR
-from shortcut_manager import ShortcutManager
-from task_manager import TaskManager
-from task_parser import NltkTaskParser # Import the concrete parser
-from overlay_window import OverlayWindow 
+from .config_manager import ConfigManager, APP_NAME, APP_AUTHOR
+from .shortcut_manager import ShortcutManager
+from .task_manager import TaskManager
+from .task_parser import NltkTaskParser # Import the concrete parser
+from .overlay_window import OverlayWindow
 
 def ensure_nltk_data():
     """Checks for NLTK 'punkt' tokenizer and attempts to download if missing."""
