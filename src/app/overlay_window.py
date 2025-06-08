@@ -14,7 +14,7 @@ if TYPE_CHECKING:
     from task_parser import BaseTaskParser
     from task_list_view import TaskListView
 
-from task_list_view import TaskListView
+from .task_list_view import TaskListView
 
 try:
     from noise import pnoise2
