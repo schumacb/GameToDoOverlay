@@ -3,7 +3,7 @@ from PySide6.QtWidgets import QApplication, QWidget, QVBoxLayout, QLabel, QSizeP
 from PySide6.QtCore import Qt, QPoint, QTimer, QRect, Slot
 from PySide6.QtGui import (
     QFont, QScreen, QCursor, QKeyEvent, QClipboard, QMouseEvent,
-    QPainter, QColor, QImage
+    QPainter, QColor, QImage, QGuiApplication
 )
 
 from typing import TYPE_CHECKING
@@ -107,13 +107,22 @@ class OverlayWindow(QWidget):
 
     def _setup_ui(self):
         """Initializes the main UI structure, window flags, and appearance."""
+        platform_name = QGuiApplication.platformName()
+        print(f"Detected platform: {platform_name}")
+
         flags = Qt.FramelessWindowHint
         if self.config_manager.get("window.always_on_top"):
             flags |= Qt.WindowStaysOnTopHint
         self.setWindowFlags(flags)
+        print(f"Window flags set to: {self.windowFlags()}")
         self.setAttribute(Qt.WA_TranslucentBackground, True)
+        print(f"Qt.WA_TranslucentBackground active: {self.testAttribute(Qt.WA_TranslucentBackground)}")
+        if platform_name == "wayland":
+            self.setAttribute(Qt.WA_NoSystemBackground, True)
+            print(f"Qt.WA_NoSystemBackground active on Wayland: {self.testAttribute(Qt.WA_NoSystemBackground)}")
         opacity = float(self.config_manager.get("appearance.transparency", 0.85))
         self.setWindowOpacity(opacity)
+        print(f"Window opacity set to: {self.windowOpacity()}")
 
         self.main_layout = QVBoxLayout(self)
         # Add margins for the faded border effect
@@ -191,6 +200,7 @@ class OverlayWindow(QWidget):
              if self.config_manager.get("window.last_height") is None: self.config_manager.set("window.last_height", height)
 
         self.setGeometry(x, y, width, height)
+        print(f"Initial geometry set to: x={x}, y={y}, width={width}, height={height}")
 
     def _connect_signals_and_shortcuts(self):
         """Connects internal and external signals/shortcuts to their handlers."""
@@ -273,8 +283,18 @@ class OverlayWindow(QWidget):
                 cursor_type = self._current_resize_edge_to_cursor_type(self._current_resize_edge)
                 self.setCursor(CURSOR_MAP.get(cursor_type, Qt.ArrowCursor))
             else:
-                self._is_dragging = True; self._is_resizing = False
-                self._drag_offset = event.globalPosition().toPoint() - self.frameGeometry().topLeft()
+                # Not resizing, so could be dragging
+                platform_name = QGuiApplication.platformName()
+                if platform_name == "wayland" and self.windowHandle():
+                    print("Attempting system move for Wayland.")
+                    self._is_dragging = False # System handles dragging
+                    self.windowHandle().startSystemMove()
+                    # event.accept() is called below, covering this path
+                else:
+                    # Original logic for non-Wayland or if windowHandle is None
+                    self._is_dragging = True
+                    self._drag_offset = event.globalPosition().toPoint() - self.frameGeometry().topLeft()
+                self._is_resizing = False # Explicitly ensure resizing is false if not on an edge
             event.accept()
 
     def mouseMoveEvent(self, event: QMouseEvent):
@@ -292,6 +312,7 @@ class OverlayWindow(QWidget):
                 new_h = max(effective_min_height, new_geom.height() - delta.y()); new_geom.setTop(new_geom.bottom() - new_h)
             elif "bottom" in self._current_resize_edge: new_geom.setHeight(max(effective_min_height, new_geom.height() + delta.y()))
             self.setGeometry(new_geom)
+            print(f"Resizing: new geometry set to x={new_geom.x()}, y={new_geom.y()}, w={new_geom.width()}, h={new_geom.height()}")
             self.update() # Trigger repaint for border
             event.accept()
         elif self._is_dragging and (event.buttons() & Qt.LeftButton):
@@ -359,6 +380,7 @@ class OverlayWindow(QWidget):
 
     def paintEvent(self, event: 'QPaintEvent'):
         """Handles paint events for the window, drawing a custom faded border."""
+        print("paintEvent called")
         super().paintEvent(event)
         clear_painter = QPainter(self)
         clear_painter.setCompositionMode(QPainter.CompositionMode_Source)
